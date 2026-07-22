@@ -104,8 +104,18 @@ cd windsurf && python3 -m http.server 8080
 
 ## CI
 
-Every push runs `test-selftest.mjs` in Node on Ubuntu. Green build =
-algorithms are still faithful to the Rust reference.
+The CI workflow file (`.github/workflows/ci.yml`) is intentionally **not
+committed** — the OAuth token used to push this repo doesn't carry the
+`workflow` scope, which GitHub requires to add `.github/workflows/*.yml`
+files. To enable CI:
+
+1. On GitHub → Settings → Actions → General → "Allow all actions and
+   reusable workflows" (already on for public repos).
+2. Create `.github/workflows/ci.yml` from the snippet in this README's
+   repo (or copy the local file) and push it manually.
+
+The `selftest` job runs `node test-selftest.mjs` on every push. The
+`pages` job deploys `index.html` to GitHub Pages.
 
 ## Why a port?
 
