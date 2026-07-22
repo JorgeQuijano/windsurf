@@ -191,12 +191,13 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r4-2026-07-22 (cpu default + BLEND on)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r5-2026-07-22 (alpha from accumAlpha, texture filter fallback)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
         <div class="row"><span>step</span><span id="step">0</span></div>
         <div class="row"><span>sim steps/frame</span><span id="spf">0</span></div>
+        <div class="row"><span>density</span><span id="density-stats" style="font-family:ui-monospace,monospace;font-size:11px">–</span></div>
         <div class="row"><span>Cd</span><span id="cd">–</span></div>
         <div class="row"><span>F_x</span><span id="fx">–</span></div>
       </div>
@@ -1332,15 +1333,19 @@ void main() {
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
   }
-  outColor = vec4(accumColor + (1.0 - accumAlpha) * bg, 1.0);
-}
-`;
+  outColor = vec4(accumColor + (1.0 - accumAlpha) * bg, accumAlpha);
+}`;
 
 function createRenderer(canvas, spec) {
   const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
   if (!gl) throw new Error('WebGL2 not available');
   if (!gl.getExtension('EXT_color_buffer_float')) {
     console.warn('EXT_color_buffer_float missing — volume rendering may degrade');
+  }
+  // R32F texture sampling needs OES_texture_float_linear for LINEAR filter.
+  const tfl = gl.getExtension('OES_texture_float_linear');
+  if (!tfl) {
+    console.warn('OES_texture_float_linear missing — falling back to NEAREST filter for volume');
   }
 
   const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
@@ -1382,8 +1387,9 @@ function createRenderer(canvas, spec) {
   const tex = gl.createTexture();
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_3D, tex);
-  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  const filter = tfl ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
@@ -1778,6 +1784,7 @@ async function main() {
   const spfEl = document.getElementById('spf');
   const cdEl = document.getElementById('cd');
   const fxEl = document.getElementById('fx');
+  const densityStatsEl = document.getElementById('density-stats');
   const uInfInput = document.getElementById('u-inf');
   const uInfVal = document.getElementById('u-inf-val');
   const viscInput = document.getElementById('visc');
@@ -1964,6 +1971,23 @@ async function main() {
       // CPU path: synchronous density. WebGPU: readback once in a while.
       if (backend.density) {
         renderer.uploadVolume(backend.density);
+        // Diagnostic: track density range so we can see if data is flowing.
+        if (window.__densityStats !== false) {
+          if (!window.__densityStats) {
+            const d = backend.density;
+            let mn = Infinity, mx = -Infinity, sum = 0, nz = 0;
+            for (let i = 0; i < d.length; i++) {
+              const v = d[i];
+              if (v < mn) mn = v;
+              if (v > mx) mx = v;
+              if (v > 0.01) nz++;
+              sum += v;
+            }
+            window.__densityStats = {mn, mx, mean: sum / d.length, nonzero: nz, total: d.length};
+            console.log('[windsurf] density stats', window.__densityStats);
+            densityStatsEl.textContent = `min=${mn.toFixed(2)} max=${mx.toFixed(2)} nonzero=${(nz/d.length*100).toFixed(0)}%`;
+          }
+        }
       } else if (backend.readback) {
         backend.readback().then(() => {
           if (backend.densityCpu) renderer.uploadVolume(backend.densityCpu);
