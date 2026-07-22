@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r10-2026-07-22 (proj matrix: -1 at proj[11], B at proj[14]; translucent vol)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r10-2026-07-22 (volumetric visible: density=0.25 alpha=0.08, proj fixed)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2292,10 +2292,8 @@ async function main() {
           cameraPos: vp.cameraPos,
           volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
           volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
-          densityScale: 0.15,   // r9: scaled down so the bulk flow is translucent,
-                                // letting the bg show through and reveal the sphere hole.
-          alphaScale: 0.04,    // r9: tuned so a 24-cell deep max-density ray reaches ~50% alpha,
-                                // leaves enough room for the sphere void to read as a darker patch.
+          densityScale: 0.25,   // r10: tuned so bulk flow shows as faint teal, sphere hole reads as darker
+          alphaScale: 0.08,     // product = 0.02 per sample → accumAlpha ≈ 0.92 (opaque bulk, hole visible)
           steps: 128,          // r9: doubled steps so the ray can resolve interior structure.
           fieldMode: 0,
           solidOpacity: 0.0,
