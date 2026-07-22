@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r2-2026-07-22</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r4-2026-07-22 (cpu default + BLEND on)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1422,7 +1422,10 @@ function createRenderer(canvas, spec) {
       gl.uniform1f(uniforms.u_solidOpacity, state.solidOpacity);
       gl.clearColor(0.043, 0.051, 0.071, 1.0);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disable(gl.BLEND);
     },
   };
 }
@@ -1798,7 +1801,15 @@ async function main() {
   };
 
   // GPU or CPU compute backend.
-  const forceCpu = location.search.includes('cpu=1');
+  // Default to CPU for now: WebGPU → WebGL2 cross-API texture sharing is
+  // broken (readback pipeline drops frames / bleeds memory), so the WebGPU
+  // path leaves the volumetric ray-march blank. The CPU path runs the
+  // same JS solver, uploads density to the WebGL2 texture every frame,
+  // and renders. Pass ?gpu=1 to opt back into WebGPU compute (FUTURE:
+  // render volumetric directly in WebGPU render pass — no copy needed).
+  const forceCpu = location.search.includes('gpu=1') ? false
+                 : location.search.includes('cpu=1') ? true
+                 : true;  // default CPU until WebGPU render pass exists
   let backend;
   try {
     backend = await createComputeBackend(spec, forceCpu);
@@ -1824,7 +1835,7 @@ async function main() {
   }
 
   const camera = makeCamera(spec);
-  let playing = false;
+  let playing = true;  // autostart so the user sees motion immediately
   let stepOnce = false;
   let simStepsPerFrame = parseInt(spfSlider.value, 10);
   let lastFrameTime = performance.now();
@@ -1862,6 +1873,8 @@ async function main() {
   uInfInput.addEventListener('change', applyConfig);
   viscInput.addEventListener('change', applyConfig);
   spfSlider.addEventListener('input', () => { simStepsPerFrame = parseInt(spfSlider.value, 10); spfVal.textContent = simStepsPerFrame; });
+  playBtn.textContent = '⏸ Pause';
+  playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
     playing = !playing;
     playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
