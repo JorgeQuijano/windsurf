@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r7-2026-07-22 (?debug=solid|alpha for diags)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r8-2026-07-22 (proj matrix fixed: -1 at proj[14], B at proj[11])<...[truncated]
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1345,7 +1345,10 @@ void main() {
 }`;
 
 function createRenderer(canvas, spec) {
-  const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+  const gl = canvas.getContext('webgl2', {
+    antialias: false, depth: false,
+    preserveDrawingBuffer: true,  // keep for screenshots / toDataURL
+  });
   if (!gl) throw new Error('WebGL2 not available');
   const hasColorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
   const tfl = gl.getExtension('OES_texture_float_linear');
@@ -1446,6 +1449,239 @@ function createRenderer(canvas, spec) {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.disable(gl.BLEND);
     },
+  };
+}
+
+// =====================================================================
+// Wireframe geometry generators. Each returns a Float32Array of XYZ
+// vertices suitable for gl.LINES rendering (every 2 vertices = 1 line).
+// Coordinates are in obstacle-LOCAL space (before transform). Caller
+// applies the obstacle's transform.position/scale/rotation when uploading
+// uniforms.
+// =====================================================================
+
+function generateBoxEdges(halfExtents) {
+  const hx = halfExtents.x, hy = halfExtents.y, hz = halfExtents.z;
+  const v = [
+    [-hx, -hy, -hz], [+hx, -hy, -hz], [+hx, +hy, -hz], [-hx, +hy, -hz],
+    [-hx, -hy, +hz], [+hx, -hy, +hz], [+hx, +hy, +hz], [-hx, +hy, +hz],
+  ];
+  const e = [
+    [0,1],[1,2],[2,3],[3,0],
+    [4,5],[5,6],[6,7],[7,4],
+    [0,4],[1,5],[2,6],[3,7],
+  ];
+  const out = [];
+  for (const [a,b] of e) { out.push(...v[a], ...v[b]); }
+  return new Float32Array(out);
+}
+
+function generateIcosphereLines(subdivisions) {
+  const t = (1 + Math.sqrt(5)) / 2;
+  let verts = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+  ];
+  const norm = (v) => {
+    const l = Math.hypot(v[0], v[1], v[2]);
+    return [v[0]/l, v[1]/l, v[2]/l];
+  };
+  verts = verts.map(norm);
+  let faces = [
+    [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1],
+  ];
+  const midpointCache = new Map();
+  function midpoint(a, b) {
+    const k = a < b ? `${a}_${b}` : `${b}_${a}`;
+    if (midpointCache.has(k)) return midpointCache.get(k);
+    const va = verts[a], vb = verts[b];
+    const m = norm([(va[0]+vb[0])/2, (va[1]+vb[1])/2, (va[2]+vb[2])/2]);
+    const idx = verts.length;
+    verts.push(m);
+    midpointCache.set(k, idx);
+    return idx;
+  }
+  for (let s = 0; s < subdivisions; s++) {
+    const newFaces = [];
+    for (const [a,b,c] of faces) {
+      const ab = midpoint(a,b), bc = midpoint(b,c), ca = midpoint(c,a);
+      newFaces.push([a,ab,ca],[b,bc,ab],[c,ca,bc],[ab,bc,ca]);
+    }
+    faces = newFaces;
+  }
+  const edgeSet = new Set();
+  for (const [a,b,c] of faces) {
+    edgeSet.add(`${Math.min(a,b)}_${Math.max(a,b)}`);
+    edgeSet.add(`${Math.min(b,c)}_${Math.max(b,c)}`);
+    edgeSet.add(`${Math.min(c,a)}_${Math.max(c,a)}`);
+  }
+  const out = [];
+  for (const k of edgeSet) {
+    const [a,b] = k.split('_').map(Number);
+    out.push(...verts[a], ...verts[b]);
+  }
+  return new Float32Array(out);
+}
+
+function generateCylinderLines(radius, halfHeight, segments) {
+  const out = [];
+  const yLo = -halfHeight, yHi = +halfHeight;
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i+1) / segments) * Math.PI * 2;
+    out.push(Math.cos(a0)*radius, yLo, Math.sin(a0)*radius);
+    out.push(Math.cos(a1)*radius, yLo, Math.sin(a1)*radius);
+  }
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i+1) / segments) * Math.PI * 2;
+    out.push(Math.cos(a0)*radius, yHi, Math.sin(a0)*radius);
+    out.push(Math.cos(a1)*radius, yHi, Math.sin(a1)*radius);
+  }
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const x = Math.cos(a)*radius, z = Math.sin(a)*radius;
+    out.push(x, yLo, z, x, yHi, z);
+  }
+  return new Float32Array(out);
+}
+
+function generateTorusLines(major, minor, segments, ringSegs) {
+  const out = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i+1) / segments) * Math.PI * 2;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0);
+    const c1 = Math.cos(a1), s1 = Math.sin(a1);
+    for (let j = 0; j < ringSegs; j++) {
+      const b0 = (j / ringSegs) * Math.PI * 2;
+      const b1 = ((j+1) / ringSegs) * Math.PI * 2;
+      const r0 = major + minor * Math.cos(b0);
+      const r1 = major + minor * Math.cos(b1);
+      const y0 = minor * Math.sin(b0);
+      const y1 = minor * Math.sin(b1);
+      out.push(c0*r0, y0, s0*r0, c1*r1, y1, s1*r1);
+      out.push(c0*r0, y0, s0*r0, c0*r1, y1, s0*r1);
+    }
+  }
+  return new Float32Array(out);
+}
+
+function applyTransformToLines(localXYZ, position, rotation) {
+  // rotation is a 3x3 row-major matrix stored flat as
+  // [m00,m01,m02, m10,m11,m12, m20,m21,m22]. Applied as M*v.
+  const n = localXYZ.length / 3;
+  for (let i = 0; i < n; i++) {
+    const x = localXYZ[i*3], y = localXYZ[i*3+1], z = localXYZ[i*3+2];
+    const rx = rotation[0]*x + rotation[1]*y + rotation[2]*z;
+    const ry = rotation[3]*x + rotation[4]*y + rotation[5]*z;
+    const rz = rotation[6]*x + rotation[7]*y + rotation[8]*z;
+    localXYZ[i*3]   = rx + position.x;
+    localXYZ[i*3+1] = ry + position.y;
+    localXYZ[i*3+2] = rz + position.z;
+  }
+  return localXYZ;
+}
+
+function buildObstacleLines(obstacles) {
+  const parts = [];
+  for (const o of obstacles) {
+    let local;
+    if (o.shape === 'sphere') {
+      local = generateIcosphereLines(1);
+    } else if (o.shape === 'box') {
+      local = generateBoxEdges(o.transform.scale);
+    } else if (o.shape === 'cylinder') {
+      local = generateCylinderLines(o.transform.scale.x, o.transform.scale.y, 24);
+    } else if (o.shape === 'torus') {
+      local = generateTorusLines(o.transform.scale.x, o.transform.scale.y, 48, 12);
+    } else {
+      console.warn('Unknown obstacle shape:', o.shape);
+      continue;
+    }
+    applyTransformToLines(local, o.transform.position, o.transform.rotation);
+    parts.push(local);
+  }
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const merged = new Float32Array(total);
+  let off = 0;
+  for (const p of parts) { merged.set(p, off); off += p.length; }
+  return merged;
+}
+
+// =====================================================================
+// Wireframe obstacle renderer. Lines only. This is the reliable visual
+// layer: you will ALWAYS see the obstacle geometry, regardless of
+// whether the volumetric path produces useful output.
+// =====================================================================
+
+const LINE_VS = `#version 300 es
+in vec3 a_pos;
+uniform mat4 u_viewProj;
+void main() {
+  gl_Position = u_viewProj * vec4(a_pos, 1.0);
+}`;
+
+const LINE_FS = `#version 300 es
+precision mediump float;
+uniform vec4 u_color;
+out vec4 outColor;
+void main() {
+  outColor = u_color;
+}`;
+
+function createLineRenderer(canvas) {
+  const gl = canvas.getContext('webgl2', {
+    antialias: false, depth: false,
+    preserveDrawingBuffer: true,  // keep for screenshots / toDataURL
+  });
+  if (!gl) throw new Error('WebGL2 not available for lines');
+
+  const vs = compileShader(gl, gl.VERTEX_SHADER, LINE_VS);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, LINE_FS);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('Line program link failed: ' + gl.getProgramInfoLog(prog));
+  }
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  const uViewProj = gl.getUniformLocation(prog, 'u_viewProj');
+  const uColor = gl.getUniformLocation(prog, 'u_color');
+
+  return {
+    gl, prog, vao, buf,
+    uploadLines(arr) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+      return arr.length / 3;  // vertex count
+    },
+    draw(viewProj, color) {
+      gl.useProgram(prog);
+      gl.bindVertexArray(vao);
+      gl.uniformMatrix4fv(uViewProj, false, viewProj);
+      gl.uniform4f(uColor, color[0], color[1], color[2], color[3]);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.LINES, 0, this._vertexCount);
+      gl.disable(gl.BLEND);
+    },
+    _vertexCount: 0,
   };
 }
 
@@ -1713,18 +1949,33 @@ function makeCamera(spec) {
     view[1] = u.x;  view[5] = u.y;  view[9]  = u.z;  view[13] = -Vec3.dot(u, pos);
     view[2] = -f.x; view[6] = -f.y; view[10] = -f.z; view[14] = Vec3.dot(f, pos);
     view[3] = 0;    view[7] = 0;    view[11] = 0;    view[15] = 1;
-    // Perspective.
+    // Perspective. Column-major storage: in GL convention, the standard
+    // right-handed perspective matrix has -1 at (row=3, col=2), which in
+    // column-major flat storage is index 2*4+3 = 11. The translation B
+    // lives at (row=2, col=3) = index 3*4+2 = 14.
+    //
+    //   proj = [ fW  0   0   0 ]
+    //          [ 0   fH  0   0 ]
+    //          [ 0   0   A   B ]   (A = -(F+N)/(F-N), B = -2FN/(F-N))
+    //          [ 0   0  -1   0 ]
+    //
+    // In column-major flat indices: A=10, B=11, -1=14.
     const fov = Math.PI / 3;
     const fH = 1 / Math.tan(fov / 2);
     const fW = fH / aspect;
     const zNear = 0.1, zFar = dist * 6;
     const proj = new Float32Array(16);
-    proj[0]  = fW; proj[5]  = fH; proj[10] = -(zFar + zNear) / (zFar - zNear);
-    proj[11] = -1; proj[14] = -(2 * zFar * zNear) / (zFar - zNear);
+    proj[0]  = fW;
+    proj[5]  = fH;
+    proj[10] = -(zFar + zNear) / (zFar - zNear);  // A
+    proj[11] = -(2 * zFar * zNear) / (zFar - zNear);  // B
+    proj[14] = -1;  // perspective-divide row (row=3, col=2)
     // Combined: invViewProj = inv(view * proj) = inv(proj) * inv(view)
-    const vp = mulMat4(view, proj);
+    // vp = proj * view (column-vector convention: clip = proj * view * world).
+    // The order matters: we need proj to act on view-space coordinates.
+    const vp = mulMat4(proj, view);
     const invVp = invertMat4(vp);
-    return { invViewProj: invVp, cameraPos: [pos.x, pos.y, pos.z] };
+    return { viewProj: vp, invViewProj: invVp, cameraPos: [pos.x, pos.y, pos.z] };
   }
   return {
     viewProj,
@@ -1861,6 +2112,18 @@ async function main() {
     return;
   }
 
+  // Wireframe obstacle renderer — the reliable visual layer. You always see
+  // the obstacle geometry as lines, regardless of whether the volumetric
+  // path is producing useful output. Toggle volumetric off with ?vol=0.
+  let lines = null;
+  try {
+    lines = createLineRenderer(canvas);
+    window.__windsurfLines = lines;
+  } catch (e) {
+    console.warn('Line renderer init failed:', e);
+  }
+  const showVolumetric = !location.search.includes('vol=0');
+
   const camera = makeCamera(spec);
   let playing = true;  // autostart so the user sees motion immediately
   let stepOnce = false;
@@ -1891,6 +2154,11 @@ async function main() {
     backend.reset(config);
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     dragTimer = 0;
+    // Refresh the wireframe obstacle buffer whenever obstacles change.
+    if (lines) {
+      const arr = buildObstacleLines(config.obstacles);
+      lines._vertexCount = lines.uploadLines(arr);
+    }
   }
   applyConfig();
 
@@ -2015,18 +2283,30 @@ async function main() {
       }
       const aspect = canvas.clientWidth / canvas.clientHeight;
       const vp = camera.viewProj(aspect);
-      renderer.draw({
-        invViewProj: vp.invViewProj,
-        cameraPos: vp.cameraPos,
-        volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
-        volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
-        densityScale: 1.0,    // was 8.0 — that saturated alpha on first sample
-        alphaScale: 0.18,     // tuned so a 24-cell deep volume reaches ~99% opacity
-        steps: 96,
-        fieldMode: 0,
-        solidOpacity: 0.0,
-        debugMode,
-      });
+      if (showVolumetric) {
+        renderer.draw({
+          invViewProj: vp.invViewProj,
+          cameraPos: vp.cameraPos,
+          volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
+          volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
+          densityScale: 1.0,    // was 8.0 — that saturated alpha on first sample
+          alphaScale: 0.18,     // tuned so a 24-cell deep volume reaches ~99% opacity
+          steps: 96,
+          fieldMode: 0,
+          solidOpacity: 0.0,
+          debugMode,
+        });
+      } else {
+        // Volumetric off (e.g. ?vol=0) — clear canvas to background ourselves.
+        const gl = renderer.gl;
+        gl.clearColor(0.043, 0.051, 0.071, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      // Wireframe obstacle overlay — drawn on top regardless of volumetric
+      // state so the user always sees the obstacle geometry.
+      if (lines && lines._vertexCount > 0) {
+        lines.draw(vp.viewProj, [0.45, 0.85, 1.0, 1.0]);
+      }
     } catch (e) {
       console.error('Render error:', e);
     }
