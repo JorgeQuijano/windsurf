@@ -1320,8 +1320,8 @@ void main() {
     vec3 uvw = (p - u_volumeMin) / (u_volumeSize);
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
 
-    float sample = texture(u_volume, uvw).r;
-    float d = sample * u_densityScale;
+    float val = texture(u_volume, uvw).r;
+    float d = val * u_densityScale;
     if (d < 0.001) continue;
 
     vec3 color = viridis(clamp(d, 0.0, 1.0));
