@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r5-2026-07-22 (alpha from accumAlpha, texture filter fallback)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r6-2026-07-22 (density 1.0, alpha 0.18 — proper volume)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2000,8 +2000,8 @@ async function main() {
         cameraPos: vp.cameraPos,
         volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
         volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
-        densityScale: 8.0,
-        alphaScale: 0.35,
+        densityScale: 1.0,    // was 8.0 — that saturated alpha on first sample
+        alphaScale: 0.18,     // tuned so a 24-cell deep volume reaches ~99% opacity
         steps: 96,
         fieldMode: 0,
         solidOpacity: 0.0,
