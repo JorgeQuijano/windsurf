@@ -1,0 +1,2021 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>windsurf-js — 3D wind tunnel in your browser</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --panel: #14171f;
+      --panel-2: #1c2030;
+      --border: #2a2f3d;
+      --text: #e6e8ee;
+      --muted: #8b92a5;
+      --accent: #6fd0ff;
+      --good: #6fe3a4;
+      --bad: #ff7a7a;
+      --warn: #ffce6a;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
+    #app {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      height: 100vh;
+      width: 100vw;
+    }
+    #render-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: var(--bg);
+      cursor: grab;
+    }
+    #render-canvas:active { cursor: grabbing; }
+    #panel {
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    header h1 {
+      margin: 0 0 4px 0;
+      font-size: 18px;
+      letter-spacing: 0.5px;
+    }
+    #backend-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 11px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    #backend-badge.gpu { background: #143b2e; color: var(--good); }
+    #backend-badge.cpu { background: #3b1f14; color: var(--warn); }
+    #readout {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px;
+      background: var(--panel-2);
+      border-radius: 6px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px;
+    }
+    #readout .row {
+      display: flex;
+      justify-content: space-between;
+    }
+    #readout .row > span:first-child { color: var(--muted); }
+    .control { display: flex; flex-direction: column; gap: 6px; }
+    .control label {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .control label span { color: var(--accent); font-family: ui-monospace, monospace; text-transform: none; }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+    }
+    button {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: #1a3a52; border-color: var(--accent); }
+    #selftest-section {
+      margin-top: auto;
+      padding: 10px;
+      background: var(--panel-2);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    #selftest-badge {
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      padding: 4px 0;
+      color: var(--muted);
+    }
+    #selftest-badge.running { color: var(--warn); }
+    #selftest-badge.passed { color: var(--good); }
+    #selftest-badge.failed { color: var(--bad); }
+    #selftest-log {
+      margin-top: 8px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    #selftest-log .pass { color: var(--good); }
+    #selftest-log .fail { color: var(--bad); }
+    footer {
+      font-size: 10px;
+      color: var(--muted);
+      display: flex;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--accent); }
+    #camera-help {
+      font-size: 11px;
+      color: var(--muted);
+      padding: 8px 10px;
+      background: var(--panel-2);
+      border-radius: 6px;
+    }
+    #camera-help kbd {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: ui-monospace, monospace;
+      font-size: 10px;
+    }
+    .err-overlay {
+      position: fixed; inset: 0;
+      background: rgba(11,13,18,0.95);
+      display: flex; align-items: center; justify-content: center;
+      padding: 40px;
+      z-index: 100;
+    }
+    .err-overlay .box {
+      max-width: 720px;
+      padding: 24px;
+      background: #2b1216;
+      border: 1px solid var(--bad);
+      border-radius: 8px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      color: var(--bad);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="render-canvas"></canvas>
+    <aside id="panel">
+      <header>
+        <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
+        <span id="backend-badge">detecting…</span>
+      </header>
+      <div id="readout">
+        <div class="row"><span>FPS</span><span id="fps">–</span></div>
+        <div class="row"><span>steps/s</span><span id="sps">–</span></div>
+        <div class="row"><span>step</span><span id="step">0</span></div>
+        <div class="row"><span>sim steps/frame</span><span id="spf">0</span></div>
+        <div class="row"><span>Cd</span><span id="cd">–</span></div>
+        <div class="row"><span>F_x</span><span id="fx">–</span></div>
+      </div>
+      <div class="control">
+        <label>u_inf <span id="u-inf-val">0.08</span></label>
+        <input type="range" id="u-inf" min="0.02" max="0.20" step="0.005" value="0.08">
+      </div>
+      <div class="control">
+        <label>viscosity ν <span id="visc-val">0.030</span></label>
+        <input type="range" id="visc" min="0.005" max="0.10" step="0.005" value="0.030">
+      </div>
+      <div class="control">
+        <label>sim steps/frame <span id="spf-val">1</span></label>
+        <input type="range" id="spf-slider" min="0" max="20" step="1" value="1">
+      </div>
+      <div class="buttons">
+        <button id="play" class="primary">▶ Play</button>
+        <button id="step-once">Step</button>
+        <button id="reset">Reset</button>
+      </div>
+      <div id="camera-help">
+        <kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>R</kbd> reset view
+      </div>
+      <div id="selftest-section">
+        <div id="selftest-badge">self-test: idle</div>
+        <button id="run-selftest">Run self-test</button>
+        <div id="selftest-log"></div>
+      </div>
+      <footer>
+        <a href="?selftest=1">?selftest=1</a>
+        <a href="https://github.com/JorgeQuijano/windsurf">github</a>
+      </footer>
+    </aside>
+  </div>
+
+<script>
+'use strict';
+
+/* =====================================================================
+   windsurf-js — single-file 3D wind tunnel / LBM CFD simulator.
+
+   Ports (faithfully, line-for-line where it matters) the algorithms of:
+     - windsurf-core/grid.rs       -> Grid, GridSpec
+     - windsurf-core/obstacle.rs   -> Obstacle, SDFs, Transform
+     - windsurf-core/solver.rs     -> LbmSolver, SolverConfig, opposite()
+     - windsurf-core/drag.rs       -> computeDrag
+     - windsurf-core/streamlines.rs-> StreamlineTracer, sampleVelocity
+     - windsurf-headless/scenes.rs -> runUniform, runSphere, SceneReport
+
+   All 22 Rust unit tests are reproduced as in-browser assertions that
+   can be run via ?selftest=1 or the "Run self-test" button.
+
+   Compute path:
+     - WebGPU compute kernels (preferred) — LBM step runs on GPU
+     - WebGL2 fallback — same algorithm runs on CPU in JS, uploads 3D
+       texture to WebGL2 for rendering
+
+   Render path:
+     - WebGL2 fragment-shader volumetric ray-march through the 3D grid
+     - Camera: orbit (mouse drag) + dolly (scroll)
+   ===================================================================== */
+
+/* =====================================================================
+   SECTION 1 — Math primitives
+   ===================================================================== */
+
+const Vec3 = {
+  add: (a, b) => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }),
+  sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }),
+  scale: (a, s) => ({ x: a.x * s, y: a.y * s, z: a.z * s }),
+  dot: (a, b) => a.x * b.x + a.y * b.y + a.z * b.z,
+  cross: (a, b) => ({
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  }),
+  length: (a) => Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z),
+  lengthSq: (a) => a.x * a.x + a.y * a.y + a.z * a.z,
+  normalize: (a) => {
+    const l = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    return l > 1e-12 ? { x: a.x / l, y: a.y / l, z: a.z / l } : { x: 0, y: 0, z: 0 };
+  },
+  abs: (a) => ({ x: Math.abs(a.x), y: Math.abs(a.y), z: Math.abs(a.z) }),
+  clamp: (a, lo, hi) => ({
+    x: Math.max(lo, Math.min(hi, a.x)),
+    y: Math.max(lo, Math.min(hi, a.y)),
+    z: Math.max(lo, Math.min(hi, a.z)),
+  }),
+  ZERO: { x: 0, y: 0, z: 0 },
+  X: { x: 1, y: 0, z: 0 },
+  Y: { x: 0, y: 1, z: 0 },
+  Z: { x: 0, y: 0, z: 1 },
+};
+
+// Row-major 3x3 matrix stored as 9-element array: [m00,m01,m02, m10,m11,m12, m20,m21,m22]
+const Mat3 = {
+  identity: () => [1, 0, 0, 0, 1, 0, 0, 0, 1],
+  transpose: (m) => [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]],
+  mulVec: (m, v) => ({
+    x: m[0] * v.x + m[1] * v.y + m[2] * v.z,
+    y: m[3] * v.x + m[4] * v.y + m[5] * v.z,
+    z: m[6] * v.x + m[7] * v.y + m[8] * v.z,
+  }),
+};
+
+/* =====================================================================
+   SECTION 2 — LBM constants (D3Q19) and Grid
+   ===================================================================== */
+
+const Q = 19;
+// D3Q19 velocities: rest, 6 face neighbours, 12 edge neighbours.
+const D3Q19 = [
+  [0, 0, 0],   // 0  rest
+  [1, 0, 0],   // 1  +x
+  [-1, 0, 0],  // 2  -x
+  [0, 1, 0],   // 3  +y
+  [0, -1, 0],  // 4  -y
+  [0, 0, 1],   // 5  +z
+  [0, 0, -1],  // 6  -z
+  [1, 1, 0],   // 7  +x+y
+  [1, -1, 0],  // 8  +x-y
+  [-1, 1, 0],  // 9  -x+y
+  [-1, -1, 0], // 10 -x-y
+  [1, 0, 1],   // 11 +x+z
+  [1, 0, -1],  // 12 +x-z
+  [-1, 0, 1],  // 13 -x+z
+  [-1, 0, -1], // 14 -x-z
+  [0, 1, 1],   // 15 +y+z
+  [0, 1, -1],  // 16 +y-z
+  [0, -1, 1],  // 17 -y+z
+  [0, -1, -1], // 18 -y-z
+];
+// Lattice weights: rest 1/3, faces 1/18, edges 1/36. Sum to 1.
+const W = [
+  1 / 3,
+  1 / 18, 1 / 18, 1 / 18, 1 / 18, 1 / 18, 1 / 18,
+  1 / 36, 1 / 36, 1 / 36, 1 / 36, 1 / 36, 1 / 36, 1 / 36, 1 / 36,
+  1 / 36, 1 / 36, 1 / 36, 1 / 36,
+];
+// Index of the opposite direction. q=0 (rest) is its own opposite.
+const OPPOSITE = [0, 2, 1, 4, 3, 6, 5, 10, 9, 8, 7, 14, 13, 12, 11, 18, 17, 16, 15];
+
+class Grid {
+  constructor(nx, ny, nz, u_inf, rho0) {
+    this.nx = nx; this.ny = ny; this.nz = nz;
+    this.cs2 = 1 / 3;
+    this.n = nx * ny * nz;
+    this.f = new Float32Array(this.n * Q);
+    this.rho = new Float32Array(this.n);
+    this.u = new Float32Array(this.n * 3);
+    const uSq = u_inf * u_inf;
+    for (let i = 0; i < this.n; i++) {
+      this.rho[i] = rho0;
+      this.u[i * 3 + 0] = u_inf;
+      this.u[i * 3 + 1] = 0;
+      this.u[i * 3 + 2] = 0;
+      for (let q = 0; q < Q; q++) {
+        const c = D3Q19[q];
+        const cu = c[0] * u_inf;
+        // Equilibrium: f_eq = w_q * rho * (1 + 3 cu + 4.5 cu^2 - 1.5 |u|^2)
+        this.f[i * Q + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSq);
+      }
+    }
+  }
+
+  lin(x, y, z) { return x + y * this.nx + z * this.nx * this.ny; }
+
+  computeMacroscopic() {
+    for (let i = 0; i < this.n; i++) {
+      let rho = 0, mx = 0, my = 0, mz = 0;
+      for (let q = 0; q < Q; q++) {
+        const fq = this.f[i * Q + q];
+        rho += fq;
+        mx += D3Q19[q][0] * fq;
+        my += D3Q19[q][1] * fq;
+        mz += D3Q19[q][2] * fq;
+      }
+      this.rho[i] = rho;
+      const inv = rho > 1e-12 ? 1 / rho : 0;
+      this.u[i * 3 + 0] = mx * inv;
+      this.u[i * 3 + 1] = my * inv;
+      this.u[i * 3 + 2] = mz * inv;
+    }
+  }
+}
+
+/* =====================================================================
+   SECTION 3 — Obstacles, SDFs, Transforms
+   ===================================================================== */
+
+function worldToLocal(t, p) {
+  const dx = p.x - t.position.x;
+  const dy = p.y - t.position.y;
+  const dz = p.z - t.position.z;
+  // Apply inverse rotation (transpose)
+  const r = t.rotation;
+  const lx = r[0] * dx + r[3] * dy + r[6] * dz;
+  const ly = r[1] * dx + r[4] * dy + r[7] * dz;
+  const lz = r[2] * dx + r[5] * dy + r[8] * dz;
+  // Avoid divide-by-zero
+  const sx = Math.abs(t.scale.x) > 1e-9 ? t.scale.x : 1e-9;
+  const sy = Math.abs(t.scale.y) > 1e-9 ? t.scale.y : 1e-9;
+  const sz = Math.abs(t.scale.z) > 1e-9 ? t.scale.z : 1e-9;
+  return { x: lx / sx, y: ly / sy, z: lz / sz };
+}
+
+// Rotation matrix that maps Vec3.Y to a given unit axis. Rodrigues formula.
+function rotationFromTo(from, to) {
+  const v = Vec3.cross(from, to);
+  const c = Vec3.dot(from, to);
+  const k = 1 / (1 + c); // numerical stability
+  return [
+    c + k * v.x * v.x,       k * v.x * v.y - v.z,  k * v.x * v.z + v.y,
+    k * v.x * v.y + v.z,     c + k * v.y * v.y,    k * v.y * v.z - v.x,
+    k * v.x * v.z - v.y,     k * v.y * v.z + v.x,  c + k * v.z * v.z,
+  ];
+}
+
+function makeObstacle(shape, position, scale, rotation, name) {
+  return { shape, transform: { position, scale, rotation }, name };
+}
+
+function obstacleSphere(center, radius) {
+  return makeObstacle('sphere', { ...center },
+    { x: radius, y: radius, z: radius }, Mat3.identity(), 'Sphere');
+}
+
+function obstacleBox(center, halfExtents) {
+  return makeObstacle('box', { ...center },
+    { ...halfExtents }, Mat3.identity(), 'Box');
+}
+
+function obstacleCylinder(center, radius, halfHeight, axis) {
+  const norm = Vec3.normalize(axis);
+  let rotation = Mat3.identity();
+  const lenSq = Vec3.lengthSq(axis);
+  if (lenSq > 0 && !(norm.x === 0 && norm.y === 1 && norm.z === 0)) {
+    rotation = rotationFromTo(Vec3.Y, norm);
+  }
+  return makeObstacle('cylinder', { ...center },
+    { x: radius, y: halfHeight, z: radius }, rotation, 'Cylinder');
+}
+
+function obstacleTorus(center, major, minor) {
+  return makeObstacle('torus', { ...center },
+    { x: major, y: minor, z: major }, Mat3.identity(), 'Torus');
+}
+
+function signedDistance(obs, worldP) {
+  const p = worldToLocal(obs.transform, worldP);
+  switch (obs.shape) {
+    case 'sphere':
+      return Vec3.length(p) - 1;
+    case 'box': {
+      const qx = Math.abs(p.x) - 1;
+      const qy = Math.abs(p.y) - 1;
+      const qz = Math.abs(p.z) - 1;
+      const ox = Math.max(qx, 0);
+      const oy = Math.max(qy, 0);
+      const oz = Math.max(qz, 0);
+      const outside = Math.sqrt(ox * ox + oy * oy + oz * oz);
+      const inside = Math.min(Math.max(qx, Math.max(qy, qz)), 0);
+      return outside + inside;
+    }
+    case 'cylinder': {
+      const dRadial = Math.sqrt(p.x * p.x + p.z * p.z) - 1;
+      const dAxial = Math.abs(p.y) - 1;
+      const r = Math.max(dRadial, dAxial);
+      const inside = Math.max(dRadial, -dAxial);
+      return Math.min(r, Math.max(inside, 0)) + Math.min(inside, 0);
+    }
+    case 'torus': {
+      const radial = Math.sqrt(p.x * p.x + p.z * p.z) - 1;
+      return Math.sqrt(radial * radial + p.y * p.y);
+    }
+    default:
+      return Infinity;
+  }
+}
+
+function obstacleNormal(obs, worldP) {
+  const h = 0.5;
+  const dx = { x: h, y: 0, z: 0 };
+  const dy = { x: 0, y: h, z: 0 };
+  const dz = { x: 0, y: 0, z: h };
+  const g = {
+    x: signedDistance(obs, Vec3.add(worldP, dx)) - signedDistance(obs, Vec3.sub(worldP, dx)),
+    y: signedDistance(obs, Vec3.add(worldP, dy)) - signedDistance(obs, Vec3.sub(worldP, dy)),
+    z: signedDistance(obs, Vec3.add(worldP, dz)) - signedDistance(obs, Vec3.sub(worldP, dz)),
+  };
+  return Vec3.normalize(g);
+}
+
+/* =====================================================================
+   SECTION 4 — LBM Solver
+   ===================================================================== */
+
+class LbmSolver {
+  constructor(config) {
+    this.config = config;
+    this.grid = new Grid(config.nx, config.ny, config.nz, config.u_inf, config.rho0);
+    this.solid = new Uint8Array(this.grid.n);
+    this.fstar = new Float32Array(this.grid.n * Q);
+    this.stepCount = 0;
+    this._rasteriseObstacles();
+  }
+
+  _rasteriseObstacles() {
+    const { nx, ny, nz } = this.config;
+    const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          const p = { x: x - cx, y: y - cy, z: z - cz };
+          let inside = false;
+          for (const obs of this.config.obstacles) {
+            if (signedDistance(obs, p) <= 0) {
+              inside = true;
+              break;
+            }
+          }
+          this.solid[this.grid.lin(x, y, z)] = inside ? 1 : 0;
+        }
+      }
+    }
+  }
+
+  step() {
+    const { nx, ny, nz, u_inf, rho0 } = this.config;
+    const tau = this.config.viscosity / (1 / 3) + 0.5;
+    const inv_tau = 1 / tau;
+    const cs2 = this.grid.cs2;
+    const n = this.grid.n;
+
+    // 1. Macroscopic from current f.
+    this.grid.computeMacroscopic();
+
+    // 2. Collision into fstar.
+    for (let i = 0; i < n; i++) {
+      const rho = this.grid.rho[i];
+      const ux = this.grid.u[i * 3 + 0];
+      const uy = this.grid.u[i * 3 + 1];
+      const uz = this.grid.u[i * 3 + 2];
+      const uSq = ux * ux + uy * uy + uz * uz;
+      for (let q = 0; q < Q; q++) {
+        const c = D3Q19[q];
+        const cu = c[0] * ux + c[1] * uy + c[2] * uz;
+        // Equivalently the Rust form: 1 + cu/cs2 + 0.5*(cu/cs2)^2 - 0.5*uSq/cs2
+        const feq = W[q] * rho * (1 + cu / cs2 + 0.5 * (cu * cu) / (cs2 * cs2) - 0.5 * uSq / cs2);
+        const fq = this.grid.f[i * Q + q];
+        this.fstar[i * Q + q] = fq - inv_tau * (fq - feq);
+      }
+    }
+
+    // 3. Streaming (pull scheme).
+    const fNew = new Float32Array(n * Q);
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          const i = this.grid.lin(x, y, z);
+          if (this.solid[i]) continue; // fNew stays 0
+          for (let q = 0; q < Q; q++) {
+            const c = D3Q19[q];
+            const xs = ((x - c[0]) % nx + nx) % nx;
+            const ys = ((y - c[1]) % ny + ny) % ny;
+            const zs = ((z - c[2]) % nz + nz) % nz;
+            const src = this.grid.lin(xs, ys, zs);
+            if (this.solid[src]) {
+              // Bounce-back: reverse direction in this cell's post-collision state.
+              fNew[i * Q + q] = this.fstar[i * Q + OPPOSITE[q]];
+            } else {
+              fNew[i * Q + q] = this.fstar[src * Q + q];
+            }
+          }
+        }
+      }
+    }
+    this.grid.f = fNew;
+
+    // 4. Boundary conditions.
+    this._applyBoundary();
+    this.stepCount++;
+  }
+
+  _applyBoundary() {
+    const { nx, ny, nz, u_inf, rho0 } = this.config;
+    const uSq = u_inf * u_inf;
+    // Inlet (x=0): equilibrium at (u_inf, 0, 0)
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        const i = this.grid.lin(0, y, z);
+        if (this.solid[i]) continue;
+        for (let q = 0; q < Q; q++) {
+          const c = D3Q19[q];
+          const cu = c[0] * u_inf;
+          this.grid.f[i * Q + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSq);
+        }
+      }
+    }
+    // Outlet (x=nx-1): copy from x=nx-2
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        const dst = this.grid.lin(nx - 1, y, z);
+        const src = this.grid.lin(nx - 2, y, z);
+        if (!this.solid[dst]) {
+          for (let q = 0; q < Q; q++) {
+            this.grid.f[dst * Q + q] = this.grid.f[src * Q + q];
+          }
+        }
+      }
+    }
+  }
+}
+
+/* =====================================================================
+   SECTION 5 — Drag computation
+   ===================================================================== */
+
+function computeDrag(solver, obstacleIdx) {
+  if (obstacleIdx >= solver.config.obstacles.length) {
+    return { force: { x: 0, y: 0, z: 0 }, cd: 0, area: 0, reynolds: 0, surfaceCells: 0 };
+  }
+  const obs = solver.config.obstacles[obstacleIdx];
+  const { nx, ny, nz, rho0 } = solver.config;
+  const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+
+  let fx = 0, fy = 0, fz = 0;
+  let area = 0;
+  const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+
+  for (let z = 0; z < nz; z++) {
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++) {
+        const i = solver.grid.lin(x, y, z);
+        if (!solver.solid[i]) continue;
+        // Surface cell? Has at least one fluid neighbour.
+        let isSurface = false;
+        let firstFluid = -1;
+        for (const [dx, dy, dz] of dirs) {
+          const xx = x + dx, yy = y + dy, zz = z + dz;
+          if (xx < 0 || yy < 0 || zz < 0 || xx >= nx || yy >= ny || zz >= nz) continue;
+          const j = solver.grid.lin(xx, yy, zz);
+          if (!solver.solid[j]) { isSurface = true; firstFluid = j; break; }
+        }
+        if (!isSurface) continue;
+        const worldP = { x: x - cx, y: y - cy, z: z - cz };
+        const n = obstacleNormal(obs, worldP);
+        const pressure = solver.grid.cs2 * (solver.grid.rho[firstFluid] - rho0);
+        fx -= pressure * n.x;
+        fy -= pressure * n.y;
+        fz -= pressure * n.z;
+        area++;
+      }
+    }
+  }
+
+  const u_inf = solver.config.u_inf;
+  const cd = (area > 0 && u_inf > 1e-9)
+    ? (2 * fx) / (rho0 * u_inf * u_inf * Math.max(area * 0.5, 0.1))
+    : 0;
+  const nu = solver.config.viscosity;
+  const re = nu > 1e-9 ? u_inf * Math.sqrt(area) / nu : 0;
+  return { force: { x: fx, y: fy, z: fz }, cd, area, reynolds: re, surfaceCells: Math.floor(area) };
+}
+
+/* =====================================================================
+   SECTION 6 — Streamlines
+   ===================================================================== */
+
+class StreamlineTracer {
+  constructor(particleCount, trailLength) {
+    this.particles = [];
+    for (let i = 0; i < particleCount; i++) {
+      this.particles.push({ position: { x: 0, y: 0, z: 0 } });
+    }
+    this.trailLength = trailLength;
+    this.trails = Array.from({ length: particleCount }, () => []);
+  }
+
+  seedInlet(nx, ny, nz) {
+    let state = 0x12345 >>> 0;
+    for (const p of this.particles) {
+      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+      // skip rx
+      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+      const ry = state / 0xFFFFFFFF;
+      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+      const rz = state / 0xFFFFFFFF;
+      p.position = {
+        x: 1.5 - nx * 0.5,
+        y: (ry - 0.5) * (ny * 0.8),
+        z: (rz - 0.5) * (nz * 0.8),
+      };
+    }
+    for (const t of this.trails) t.length = 0;
+  }
+
+  step(solver, dt) {
+    const { nx, ny, nz } = solver.config;
+    const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+    for (let idx = 0; idx < this.particles.length; idx++) {
+      const p = this.particles[idx];
+      const k1 = sampleVelocity(solver, p.position);
+      const mid = {
+        x: p.position.x + 0.5 * dt * k1.x,
+        y: p.position.y + 0.5 * dt * k1.y,
+        z: p.position.z + 0.5 * dt * k1.z,
+      };
+      const k2 = sampleVelocity(solver, mid);
+      p.position = {
+        x: p.position.x + dt * k2.x,
+        y: p.position.y + dt * k2.y,
+        z: p.position.z + dt * k2.z,
+      };
+      this.trails[idx].push({ x: p.position.x, y: p.position.y, z: p.position.z });
+      if (this.trails[idx].length > this.trailLength) this.trails[idx].shift();
+
+      const px = p.position.x + cx, py = p.position.y + cy, pz = p.position.z + cz;
+      if (px < 0 || px >= nx || py < 0 || py >= ny || pz < 0 || pz >= nz) {
+        const nyLim = ny * 0.4, nzLim = nz * 0.4;
+        const nyC = Math.max(-nyLim, Math.min(nyLim, py - cy));
+        const nzC = Math.max(-nzLim, Math.min(nzLim, pz - cz));
+        p.position = { x: 1.0 - cx, y: nyC, z: nzC };
+        this.trails[idx].length = 0;
+      }
+    }
+  }
+}
+
+function sampleVelocity(solver, world) {
+  const { nx, ny, nz } = solver.config;
+  const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+  const gx = Math.max(0, Math.min(nx - 1.001, world.x + cx));
+  const gy = Math.max(0, Math.min(ny - 1.001, world.y + cy));
+  const gz = Math.max(0, Math.min(nz - 1.001, world.z + cz));
+  const x0 = Math.floor(gx), y0 = Math.floor(gy), z0 = Math.floor(gz);
+  const x1 = Math.min(x0 + 1, nx - 1);
+  const y1 = Math.min(y0 + 1, ny - 1);
+  const z1 = Math.min(z0 + 1, nz - 1);
+  const tx = gx - x0, ty = gy - y0, tz = gz - z0;
+  function fetch(x, y, z) {
+    const i = solver.grid.lin(x, y, z);
+    if (solver.solid[i]) return { x: 0, y: 0, z: 0 };
+    return { x: solver.grid.u[i * 3], y: solver.grid.u[i * 3 + 1], z: solver.grid.u[i * 3 + 2] };
+  }
+  function lerp(a, b, t) {
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
+  }
+  const c000 = fetch(x0, y0, z0), c100 = fetch(x1, y0, z0);
+  const c010 = fetch(x0, y1, z0), c110 = fetch(x1, y1, z0);
+  const c001 = fetch(x0, y0, z1), c101 = fetch(x1, y0, z1);
+  const c011 = fetch(x0, y1, z1), c111 = fetch(x1, y1, z1);
+  const c00 = lerp(c000, c100, tx), c10 = lerp(c010, c110, tx);
+  const c01 = lerp(c001, c101, tx), c11 = lerp(c011, c111, tx);
+  const c0 = lerp(c00, c10, ty), c1 = lerp(c01, c11, ty);
+  return lerp(c0, c1, tz);
+}
+
+/* =====================================================================
+   SECTION 7 — Scene runners (replaces windsurf-headless/scenes.rs)
+   ===================================================================== */
+
+function aggregate(solver, name, steps) {
+  let maxV = 0, minR = Infinity, maxR = -Infinity;
+  for (let i = 0; i < solver.grid.n; i++) {
+    if (solver.solid[i]) continue;
+    const ux = solver.grid.u[i * 3], uy = solver.grid.u[i * 3 + 1], uz = solver.grid.u[i * 3 + 2];
+    const v = Math.sqrt(ux * ux + uy * uy + uz * uz);
+    if (v > maxV) maxV = v;
+    const r = solver.grid.rho[i];
+    if (r > maxR) maxR = r;
+    if (r < minR) minR = r;
+  }
+  return { name, stepsRun: steps, maxVelocity: maxV, minDensity: minR, maxDensity: maxR };
+}
+
+function runUniform(steps) {
+  const config = {
+    nx: 24, ny: 12, nz: 12, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [],
+  };
+  const solver = new LbmSolver(config);
+  for (let i = 0; i < steps; i++) solver.step();
+  return { ...aggregate(solver, 'uniform_flow', steps), drag_x: 0, cd: 0 };
+}
+
+function runSphere(steps) {
+  const config = {
+    nx: 32, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.05,
+    obstacles: [obstacleSphere({ x: 6, y: 0, z: 0 }, 3)],
+  };
+  const solver = new LbmSolver(config);
+  for (let i = 0; i < steps; i++) solver.step();
+  const drag = computeDrag(solver, 0);
+  return { ...aggregate(solver, 'sphere_steady', steps), drag_x: drag.force.x, cd: drag.cd };
+}
+
+/* =====================================================================
+   SECTION 8 — Compute backends
+   =====================================================================
+   Two compute paths:
+     - WebGPUCompute: runs collision/streaming/density kernels on GPU
+     - CpuCompute:    runs the JS LbmSolver on CPU and exposes density
+   Both expose:
+     step(config)
+     density: Float32Array(nx*ny*nz)
+     solid:   Uint8Array(nx*ny*nz)
+   The renderer is shared (WebGL2 fragment shader samples density).
+*/
+
+async function createComputeBackend(spec, forceCpu) {
+  if (!forceCpu && navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter) {
+        const device = await adapter.requestDevice();
+        return new WebGPUCompute(device, spec);
+      }
+    } catch (e) {
+      console.warn('WebGPU init failed, falling back to CPU:', e);
+    }
+  }
+  return new CpuCompute(spec);
+}
+
+class CpuCompute {
+  constructor(spec) {
+    this.spec = spec;
+    this.solver = null;
+    this.config = null;
+    this.density = new Float32Array(spec.nx * spec.ny * spec.nz);
+    this.velMag = new Float32Array(spec.nx * spec.ny * spec.nz);
+  }
+  reset(config) {
+    this.config = config;
+    this.solver = new LbmSolver(config);
+    this._refreshDensity();
+  }
+  step() {
+    this.solver.step();
+    this._refreshDensity();
+  }
+  _refreshDensity() {
+    const n = this.solver.grid.n;
+    for (let i = 0; i < n; i++) {
+      if (this.solver.solid[i]) {
+        this.density[i] = 0;
+        this.velMag[i] = 0;
+        continue;
+      }
+      this.density[i] = this.solver.grid.rho[i];
+      const ux = this.solver.grid.u[i * 3];
+      const uy = this.solver.grid.u[i * 3 + 1];
+      const uz = this.solver.grid.u[i * 3 + 2];
+      this.velMag[i] = Math.sqrt(ux * ux + uy * uy + uz * uz);
+    }
+  }
+  get solid() { return this.solver.solid; }
+  get stepCount() { return this.solver.stepCount; }
+  // Compute drag synchronously against the CPU solver.
+  computeDrag(idx) { return computeDrag(this.solver, idx); }
+}
+
+// WGSL: collision + streaming + macroscopic kernels. The three kernels share
+// the same f_buf, fstar_buf, solid, and params. ping-pong is implicit:
+// collision writes fstar; streaming reads fstar and writes f; macroscopic
+// reads f and writes density+velMag.
+const WGSL_LBM = `
+struct Params {
+  nx: u32,
+  ny: u32,
+  nz: u32,
+  cs2: f32,
+  inv_tau: f32,
+  u_inf: f32,
+  rho0: f32,
+}
+
+const D3Q19 = array<vec3<f32>, 19>(
+  vec3<f32>(0.0, 0.0, 0.0),
+  vec3<f32>(1.0, 0.0, 0.0),
+  vec3<f32>(-1.0, 0.0, 0.0),
+  vec3<f32>(0.0, 1.0, 0.0),
+  vec3<f32>(0.0, -1.0, 0.0),
+  vec3<f32>(0.0, 0.0, 1.0),
+  vec3<f32>(0.0, 0.0, -1.0),
+  vec3<f32>(1.0, 1.0, 0.0),
+  vec3<f32>(1.0, -1.0, 0.0),
+  vec3<f32>(-1.0, 1.0, 0.0),
+  vec3<f32>(-1.0, -1.0, 0.0),
+  vec3<f32>(1.0, 0.0, 1.0),
+  vec3<f32>(1.0, 0.0, -1.0),
+  vec3<f32>(-1.0, 0.0, 1.0),
+  vec3<f32>(-1.0, 0.0, -1.0),
+  vec3<f32>(0.0, 1.0, 1.0),
+  vec3<f32>(0.0, 1.0, -1.0),
+  vec3<f32>(0.0, -1.0, 1.0),
+  vec3<f32>(0.0, -1.0, -1.0),
+);
+const W = array<f32, 19>(
+  1.0/3.0,
+  1.0/18.0, 1.0/18.0, 1.0/18.0, 1.0/18.0, 1.0/18.0, 1.0/18.0,
+  1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0,
+  1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0,
+  1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0,
+);
+const OPPOSITE = array<u32, 19>(
+  0u, 2u, 1u, 4u, 3u, 6u, 5u,
+  10u, 9u, 8u, 7u,
+  14u, 13u, 12u, 11u,
+  18u, 17u, 16u, 15u,
+);
+
+@group(0) @binding(0) var<storage, read> f_buf: array<f32>;
+@group(0) @binding(1) var<storage, read_write> fstar_buf: array<f32>;
+@group(0) @binding(2) var<storage, read> solid: array<u32>;
+@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read_write> density_buf: array<f32>;
+@group(0) @binding(5) var<storage, read_write> vel_mag_buf: array<f32>;
+
+@compute @workgroup_size(8, 4, 2)
+fn collision(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x; let y = gid.y; let z = gid.z;
+  if (x >= params.nx || y >= params.ny || z >= params.nz) { return; }
+  let cell = x + y * params.nx + z * params.nx * params.ny;
+
+  var rho = 0.0; var mx = 0.0; var my = 0.0; var mz = 0.0;
+  for (var q = 0u; q < 19u; q = q + 1u) {
+    let fq = f_buf[cell * 19u + q];
+    rho = rho + fq;
+    mx = mx + D3Q19[q].x * fq;
+    my = my + D3Q19[q].y * fq;
+    mz = mz + D3Q19[q].z * fq;
+  }
+  let inv = select(0.0, 1.0 / rho, rho > 1e-12);
+  let ux = mx * inv; let uy = my * inv; let uz = mz * inv;
+  let u_sq = ux * ux + uy * uy + uz * uz;
+
+  let cs2 = params.cs2;
+  let inv_tau = params.inv_tau;
+  for (var q = 0u; q < 19u; q = q + 1u) {
+    let c = D3Q19[q];
+    let cu = c.x * ux + c.y * uy + c.z * uz;
+    let feq = W[q] * rho * (1.0 + cu / cs2 + 0.5 * (cu * cu) / (cs2 * cs2) - 0.5 * u_sq / cs2);
+    let fq = f_buf[cell * 19u + q];
+    fstar_buf[cell * 19u + q] = fq - inv_tau * (fq - feq);
+  }
+}
+
+@compute @workgroup_size(8, 4, 2)
+fn streaming(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x; let y = gid.y; let z = gid.z;
+  if (x >= params.nx || y >= params.ny || z >= params.nz) { return; }
+  let cell = x + y * params.nx + z * params.nx * params.ny;
+
+  // Inlet (x=0): set to equilibrium at u_inf.
+  if (x == 0u) {
+    let u_inf = params.u_inf;
+    let u_sq = u_inf * u_inf;
+    let rho0 = params.rho0;
+    for (var q = 0u; q < 19u; q = q + 1u) {
+      let c = D3Q19[q];
+      let cu = c.x * u_inf;
+      f_buf[cell * 19u + q] = W[q] * rho0 * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq);
+    }
+    return;
+  }
+
+  // Outlet (x=nx-1): copy from x=nx-2.
+  if (x == params.nx - 1u) {
+    let dst = cell;
+    if (solid[dst] != 0u) { return; }
+    let src = (x - 1u) + y * params.nx + z * params.nx * params.ny;
+    for (var q = 0u; q < 19u; q = q + 1u) {
+      f_buf[dst * 19u + q] = f_buf[src * 19u + q];
+    }
+    return;
+  }
+
+  // Solid: skip (f stays 0).
+  if (solid[cell] != 0u) { return; }
+
+  // Interior fluid cell.
+  let nx_i = i32(params.nx); let ny_i = i32(params.ny); let nz_i = i32(params.nz);
+  for (var q = 0u; q < 19u; q = q + 1u) {
+    let c = D3Q19[q];
+    let xs = ((i32(x) - i32(c.x)) % nx_i + nx_i) % nx_i;
+    let ys = ((i32(y) - i32(c.y)) % ny_i + ny_i) % ny_i;
+    let zs = ((i32(z) - i32(c.z)) % nz_i + nz_i) % nz_i;
+    let src = u32(xs) + u32(ys) * params.nx + u32(zs) * params.nx * params.ny;
+    var fq: f32;
+    if (solid[src] != 0u) {
+      fq = fstar_buf[cell * 19u + OPPOSITE[q]];
+    } else {
+      fq = fstar_buf[src * 19u + q];
+    }
+    f_buf[cell * 19u + q] = fq;
+  }
+}
+
+@compute @workgroup_size(8, 4, 2)
+fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x; let y = gid.y; let z = gid.z;
+  if (x >= params.nx || y >= params.ny || z >= params.nz) { return; }
+  let cell = x + y * params.nx + z * params.nx * params.ny;
+  if (solid[cell] != 0u) {
+    density_buf[cell] = 0.0;
+    vel_mag_buf[cell] = 0.0;
+    return;
+  }
+  var rho = 0.0; var mx = 0.0; var my = 0.0; var mz = 0.0;
+  for (var q = 0u; q < 19u; q = q + 1u) {
+    let fq = f_buf[cell * 19u + q];
+    rho = rho + fq;
+    mx = mx + D3Q19[q].x * fq;
+    my = my + D3Q19[q].y * fq;
+    mz = mz + D3Q19[q].z * fq;
+  }
+  let inv = select(0.0, 1.0 / rho, rho > 1e-12);
+  let ux = mx * inv; let uy = my * inv; let uz = mz * inv;
+  density_buf[cell] = rho;
+  vel_mag_buf[cell] = sqrt(ux * ux + uy * uy + uz * uz);
+}
+`;
+
+class WebGPUCompute {
+  constructor(device, spec) {
+    this.device = device;
+    this.spec = spec;
+    this.n = spec.nx * spec.ny * spec.nz;
+    // CPU-side mirror for solid mask and density readback.
+    this.solidCpu = new Uint8Array(this.n);
+    this.densityCpu = new Float32Array(this.n);
+    this.velMagCpu = new Float32Array(this.n);
+    this.stepCount = 0;
+    this.config = null;
+    // Create bind group layout shared by all three pipelines.
+    this.bgl = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const module = device.createShaderModule({ code: WGSL_LBM });
+    const pl = device.createPipelineLayout({ bindGroupLayouts: [this.bgl] });
+    this.collisionPipeline = device.createComputePipeline({
+      layout: pl, compute: { module, entryPoint: 'collision' },
+    });
+    this.streamingPipeline = device.createComputePipeline({
+      layout: pl, compute: { module, entryPoint: 'streaming' },
+    });
+    this.macroPipeline = device.createComputePipeline({
+      layout: pl, compute: { module, entryPoint: 'macroscopic' },
+    });
+    this._allocateBuffers();
+  }
+
+  _allocateBuffers() {
+    const n = this.n, Q19 = 19;
+    this.fBuf = this.device.createBuffer({
+      size: n * Q19 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.fstarBuf = this.device.createBuffer({
+      size: n * Q19 * 4, usage: GPUBufferUsage.STORAGE,
+    });
+    this.solidBuf = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.densityBuf = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    this.velMagBuf = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    this.paramsBuf = this.device.createBuffer({
+      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.bg = this.device.createBindGroup({
+      layout: this.bgl,
+      entries: [
+        { binding: 0, resource: { buffer: this.fBuf } },
+        { binding: 1, resource: { buffer: this.fstarBuf } },
+        { binding: 2, resource: { buffer: this.solidBuf } },
+        { binding: 3, resource: { buffer: this.paramsBuf } },
+        { binding: 4, resource: { buffer: this.densityBuf } },
+        { binding: 5, resource: { buffer: this.velMagBuf } },
+      ],
+    });
+  }
+
+  reset(config) {
+    this.config = config;
+    this.stepCount = 0;
+    const { nx, ny, nz, u_inf, rho0, viscosity, obstacles } = config;
+    // Build CPU-side equilibrium and upload to f_buf.
+    const Q19 = 19;
+    const f = new Float32Array(nx * ny * nz * Q19);
+    const uSq = u_inf * u_inf;
+    for (let i = 0, ic = 0; ic < nx * ny * nz; ic++, i += Q19) {
+      for (let q = 0; q < Q19; q++) {
+        const c = D3Q19[q];
+        const cu = c[0] * u_inf;
+        f[i + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSq);
+      }
+    }
+    this.device.queue.writeBuffer(this.fBuf, 0, f);
+    this.device.queue.writeBuffer(this.fstarBuf, 0, new Float32Array(nx * ny * nz * Q19));
+    // Solid mask.
+    const solid = new Uint32Array(nx * ny * nz);
+    const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+    let idx = 0;
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++, idx++) {
+          const p = { x: x - cx, y: y - cy, z: z - cz };
+          let inside = 0;
+          for (const obs of obstacles) {
+            if (signedDistance(obs, p) <= 0) { inside = 1; break; }
+          }
+          solid[idx] = inside;
+          this.solidCpu[idx] = inside;
+        }
+      }
+    }
+    this.device.queue.writeBuffer(this.solidBuf, 0, solid);
+    // Params.
+    const tau = viscosity / (1 / 3) + 0.5;
+    const paramsData = new Float32Array([
+      nx, ny, nz, 1 / 3,
+      1 / tau, u_inf, rho0, 0,
+    ]);
+    const paramsU32 = new Uint32Array(paramsData.buffer);
+    this.device.queue.writeBuffer(this.paramsBuf, 0, paramsU32);
+    // Initial macroscopic.
+    this._dispatchInitial();
+  }
+
+  _dispatchInitial() {
+    const cmd = this.device.createCommandEncoder();
+    const pass = cmd.beginComputePass();
+    pass.setPipeline(this.macroPipeline);
+    pass.setBindGroup(0, this.bg);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.spec.nx / 8),
+      Math.ceil(this.spec.ny / 4),
+      Math.ceil(this.spec.nz / 2),
+    );
+    pass.end();
+    this.device.queue.submit([cmd.finish()]);
+  }
+
+  step() {
+    const cmd = this.device.createCommandEncoder();
+    const pass = cmd.beginComputePass();
+    pass.setBindGroup(0, this.bg);
+    pass.setPipeline(this.collisionPipeline);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.spec.nx / 8),
+      Math.ceil(this.spec.ny / 4),
+      Math.ceil(this.spec.nz / 2),
+    );
+    pass.setPipeline(this.streamingPipeline);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.spec.nx / 8),
+      Math.ceil(this.spec.ny / 4),
+      Math.ceil(this.spec.nz / 2),
+    );
+    pass.setPipeline(this.macroPipeline);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.spec.nx / 8),
+      Math.ceil(this.spec.ny / 4),
+      Math.ceil(this.spec.nz / 2),
+    );
+    pass.end();
+    this.device.queue.submit([cmd.finish()]);
+    this.stepCount++;
+  }
+
+  async readback() {
+    // Read density and velMag back to CPU. We use a temp buffer for the
+    // mapping since GPUQueue.copyBufferToBuffer + mapAsync is the supported path.
+    const tmp = this.device.createBuffer({
+      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const cmd = this.device.createCommandEncoder();
+    cmd.copyBufferToBuffer(this.densityBuf, 0, tmp, 0, this.n * 4);
+    this.device.queue.submit([cmd.finish()]);
+    await tmp.mapAsync(GPUMapMode.READ);
+    this.densityCpu.set(new Float32Array(tmp.getMappedRange().slice(0)));
+    tmp.unmap();
+    tmp.destroy();
+    const tmp2 = this.device.createBuffer({
+      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const cmd2 = this.device.createCommandEncoder();
+    cmd2.copyBufferToBuffer(this.velMagBuf, 0, tmp2, 0, this.n * 4);
+    this.device.queue.submit([cmd2.finish()]);
+    await tmp2.mapAsync(GPUMapMode.READ);
+    this.velMagCpu.set(new Float32Array(tmp2.getMappedRange().slice(0)));
+    tmp2.unmap();
+    tmp2.destroy();
+  }
+
+  // Drag: copy f+u to CPU then run JS drag. Heavyweight; we run async every
+  // ~30 frames rather than every frame.
+  async computeDragAsync(idx) {
+    // Read rho back (already cached) — but we also need u. For simplicity we
+    // just rebuild on CPU via a fresh LbmSolver with the same config. The
+    // WebGPU stepCount is in sync if user doesn't reset mid-step.
+    const cpu = new LbmSolver(this.config);
+    // Sync step count
+    for (let i = 0; i < this.stepCount; i++) cpu.step();
+    return computeDrag(cpu, idx);
+  }
+
+  // Compatibility shim: the renderer reads these synchronously.
+  get density() { return this.densityCpu; }
+  get velMag() { return this.velMagCpu; }
+  get solid() { return this.solidCpu; }
+}
+
+/* =====================================================================
+   SECTION 9 — WebGL2 volumetric renderer
+   ===================================================================== */
+
+const VERT_SRC = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const FRAG_SRC = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+in vec2 v_uv;
+out vec4 outColor;
+
+uniform sampler3D u_volume;
+uniform mat4 u_invViewProj;
+uniform vec3 u_cameraPos;
+uniform vec3 u_volumeMin;
+uniform vec3 u_volumeMax;
+uniform vec3 u_volumeSize;
+uniform float u_densityScale;
+uniform float u_alphaScale;
+uniform int   u_steps;
+uniform int   u_fieldMode; // 0 = density, 1 = velocity magnitude
+uniform float u_solidOpacity;
+
+// 6-stop viridis (dark purple -> teal-green)
+vec3 viridis(float t) {
+  t = clamp(t, 0.0, 1.0);
+  vec3 c0 = vec3(0.267, 0.005, 0.329);
+  vec3 c1 = vec3(0.282, 0.140, 0.457);
+  vec3 c2 = vec3(0.254, 0.265, 0.530);
+  vec3 c3 = vec3(0.207, 0.372, 0.553);
+  vec3 c4 = vec3(0.164, 0.471, 0.558);
+  vec3 c5 = vec3(0.128, 0.567, 0.551);
+  float s = t * 5.0;
+  int i = int(floor(s));
+  float f = s - float(i);
+  vec3 a, b;
+  if (i == 0) { a = c0; b = c1; }
+  else if (i == 1) { a = c1; b = c2; }
+  else if (i == 2) { a = c2; b = c3; }
+  else if (i == 3) { a = c3; b = c4; }
+  else if (i == 4) { a = c4; b = c5; }
+  else { a = c5; b = c5; }
+  return mix(a, b, f);
+}
+
+// Ray-box intersection, returns (tNear, tFar). tFar > tNear if hit.
+bool rayBoxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax,
+                     out float tNear, out float tFar) {
+  vec3 invD = 1.0 / rd;
+  vec3 t0 = (bmin - ro) * invD;
+  vec3 t1 = (bmax - ro) * invD;
+  vec3 tmin = min(t0, t1);
+  vec3 tmax = max(t0, t1);
+  tNear = max(max(tmin.x, tmin.y), tmin.z);
+  tFar = min(min(tmax.x, tmax.y), tmax.z);
+  return tFar > max(tNear, 0.0);
+}
+
+void main() {
+  // Background colour.
+  vec3 bg = vec3(0.043, 0.051, 0.071);
+  outColor = vec4(bg, 1.0);
+
+  // Build world-space ray.
+  vec4 ndcNear = vec4(v_uv * 2.0 - 1.0, -1.0, 1.0);
+  vec4 ndcFar  = vec4(v_uv * 2.0 - 1.0,  1.0, 1.0);
+  vec4 wNear = u_invViewProj * ndcNear;
+  vec4 wFar  = u_invViewProj * ndcFar;
+  wNear /= wNear.w;
+  wFar  /= wFar.w;
+  vec3 ro = u_cameraPos;
+  vec3 rd = normalize(wFar.xyz - wNear.xyz);
+
+  float tNear, tFar;
+  if (!rayBoxIntersect(ro, rd, u_volumeMin, u_volumeMax, tNear, tFar)) return;
+  tNear = max(tNear, 0.0);
+  if (tFar <= tNear) return;
+
+  // March with fixed step count; dither the entry to reduce banding.
+  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  float dt = (tFar - tNear) / float(u_steps);
+  float tStart = tNear + jitter * dt;
+
+  vec3 accumColor = vec3(0.0);
+  float accumAlpha = 0.0;
+  for (int i = 0; i < 256; i++) {
+    if (i >= u_steps) break;
+    float t = tStart + float(i) * dt;
+    if (t > tFar) break;
+    vec3 p = ro + rd * t;
+    vec3 uvw = (p - u_volumeMin) / (u_volumeSize);
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
+
+    float sample = texture(u_volume, uvw).r;
+    float d = sample * u_densityScale;
+    if (d < 0.001) continue;
+
+    vec3 color = viridis(clamp(d, 0.0, 1.0));
+    float a = clamp(d * u_alphaScale, 0.0, 1.0);
+    accumColor += (1.0 - accumAlpha) * color * a;
+    accumAlpha += (1.0 - accumAlpha) * a;
+    if (accumAlpha > 0.98) break;
+  }
+  outColor = vec4(accumColor + (1.0 - accumAlpha) * bg, 1.0);
+}
+`;
+
+function createRenderer(canvas, spec) {
+  const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+  if (!gl) throw new Error('WebGL2 not available');
+  if (!gl.getExtension('EXT_color_buffer_float')) {
+    console.warn('EXT_color_buffer_float missing — volume rendering may degrade');
+  }
+
+  const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('Link failed: ' + gl.getProgramInfoLog(prog));
+  }
+
+  // Fullscreen triangle strip quad.
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  // Uniform locations.
+  const uniforms = {
+    u_volume: gl.getUniformLocation(prog, 'u_volume'),
+    u_invViewProj: gl.getUniformLocation(prog, 'u_invViewProj'),
+    u_cameraPos: gl.getUniformLocation(prog, 'u_cameraPos'),
+    u_volumeMin: gl.getUniformLocation(prog, 'u_volumeMin'),
+    u_volumeMax: gl.getUniformLocation(prog, 'u_volumeMax'),
+    u_volumeSize: gl.getUniformLocation(prog, 'u_volumeSize'),
+    u_densityScale: gl.getUniformLocation(prog, 'u_densityScale'),
+    u_alphaScale: gl.getUniformLocation(prog, 'u_alphaScale'),
+    u_steps: gl.getUniformLocation(prog, 'u_steps'),
+    u_fieldMode: gl.getUniformLocation(prog, 'u_fieldMode'),
+    u_solidOpacity: gl.getUniformLocation(prog, 'u_solidOpacity'),
+  };
+
+  // 3D texture for the volume.
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_3D, tex);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  // Allocate once with zeros; we re-upload with texImage3D every frame.
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
+                gl.RED, gl.FLOAT, new Float32Array(spec.nx * spec.ny * spec.nz));
+
+  return {
+    gl, prog, vao, tex, uniforms,
+    resize(w, h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); },
+    uploadVolume(data) {
+      gl.bindTexture(gl.TEXTURE_3D, tex);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
+                    gl.RED, gl.FLOAT, data);
+    },
+    draw(state) {
+      gl.useProgram(prog);
+      gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_3D, tex);
+      gl.uniform1i(uniforms.u_volume, 0);
+      gl.uniformMatrix4fv(uniforms.u_invViewProj, false, state.invViewProj);
+      gl.uniform3fv(uniforms.u_cameraPos, state.cameraPos);
+      gl.uniform3fv(uniforms.u_volumeMin, state.volumeMin);
+      gl.uniform3fv(uniforms.u_volumeMax, state.volumeMax);
+      const vs3 = [
+        state.volumeMax[0] - state.volumeMin[0],
+        state.volumeMax[1] - state.volumeMin[1],
+        state.volumeMax[2] - state.volumeMin[2],
+      ];
+      gl.uniform3fv(uniforms.u_volumeSize, vs3);
+      gl.uniform1f(uniforms.u_densityScale, state.densityScale);
+      gl.uniform1f(uniforms.u_alphaScale, state.alphaScale);
+      gl.uniform1i(uniforms.u_steps, state.steps);
+      gl.uniform1i(uniforms.u_fieldMode, state.fieldMode);
+      gl.uniform1f(uniforms.u_solidOpacity, state.solidOpacity);
+      gl.clearColor(0.043, 0.051, 0.071, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    },
+  };
+}
+
+function compileShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(sh);
+    console.error('Shader compile failed:', log);
+    console.error('Source was:', src);
+    throw new Error('Shader compile failed: ' + log);
+  }
+  return sh;
+}
+
+/* =====================================================================
+   SECTION 10 — Test harness (22 tests ported from windsurf-rust-archive)
+   ===================================================================== */
+
+class TestRunner {
+  constructor() {
+    this.tests = [];
+    this.results = [];
+  }
+  test(name, fn) { this.tests.push({ name, fn }); }
+  assert(cond, msg) {
+    if (!cond) throw new Error('Assertion failed: ' + (msg || ''));
+  }
+  assertApprox(actual, expected, eps, msg) {
+    const diff = Math.abs(actual - expected);
+    if (diff > eps) {
+      throw new Error(`${msg || 'assertApprox'}: expected ${expected} ± ${eps}, got ${actual} (diff ${diff})`);
+    }
+  }
+  async runAll() {
+    let passed = 0, failed = 0;
+    const log = [];
+    this.results = [];
+    for (const { name, fn } of this.tests) {
+      try {
+        await fn();
+        this.results.push({ name, status: 'PASS' });
+        passed++;
+        log.push({ name, status: 'PASS' });
+      } catch (e) {
+        this.results.push({ name, status: 'FAIL', error: e.message });
+        failed++;
+        log.push({ name, status: 'FAIL', error: e.message });
+      }
+    }
+    return { passed, failed, total: this.tests.length, log };
+  }
+}
+
+function registerTests(tr) {
+  // -- grid.rs --
+  tr.test('weights_sum_to_one', () => {
+    const s = W.reduce((a, b) => a + b, 0);
+    tr.assertApprox(s, 1.0, 1e-6, `weights must sum to 1`);
+  });
+  tr.test('lin_unlin_roundtrip', () => {
+    const spec = { nx: 4, ny: 5, nz: 6 };
+    for (let z = 0; z < spec.nz; z++) {
+      for (let y = 0; y < spec.ny; y++) {
+        for (let x = 0; x < spec.nx; x++) {
+          const i = x + y * spec.nx + z * spec.nx * spec.ny;
+          const x2 = i % spec.nx;
+          const y2 = Math.floor(i / spec.nx) % spec.ny;
+          const z2 = Math.floor(i / (spec.nx * spec.ny));
+          tr.assert(x === x2 && y === y2 && z === z2,
+            `(${x},${y},${z}) -> ${i} -> (${x2},${y2},${z2})`);
+        }
+      }
+    }
+  });
+  tr.test('new_grid_is_steady_state_at_zero_obstacle', () => {
+    const g = new Grid(8, 8, 8, 0.1, 1.0);
+    for (let i = 0; i < g.n; i++) {
+      tr.assertApprox(g.rho[i], 1.0, 1e-5, 'rho');
+      tr.assertApprox(g.u[i * 3 + 0], 0.1, 1e-5, 'ux');
+      tr.assertApprox(g.u[i * 3 + 1], 0.0, 1e-5, 'uy');
+      tr.assertApprox(g.u[i * 3 + 2], 0.0, 1e-5, 'uz');
+    }
+  });
+
+  // -- obstacle.rs --
+  tr.test('sphere_sdf_is_negative_inside', () => {
+    const s = obstacleSphere({ x: 0, y: 0, z: 0 }, 1);
+    tr.assert(signedDistance(s, { x: 0, y: 0, z: 0 }) < 0, 'centre must be inside');
+    tr.assert(signedDistance(s, { x: 2, y: 0, z: 0 }) > 0, 'outside');
+    tr.assertApprox(signedDistance(s, { x: 1, y: 0, z: 0 }), 0, 1e-3, 'surface');
+  });
+  tr.test('sphere_sdf_respects_scale', () => {
+    const s = obstacleSphere({ x: 0, y: 0, z: 0 }, 5);
+    tr.assertApprox(signedDistance(s, { x: 5, y: 0, z: 0 }), 0, 1e-3, 'scaled surface');
+  });
+  tr.test('box_sdf_negative_inside', () => {
+    const b = obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 });
+    tr.assert(signedDistance(b, { x: 0, y: 0, z: 0 }) < 0, 'inside');
+    tr.assert(signedDistance(b, { x: 3, y: 0, z: 0 }) > 0, 'outside');
+  });
+  tr.test('cylinder_sdf_negative_inside', () => {
+    const c = obstacleCylinder({ x: 0, y: 0, z: 0 }, 1, 1, Vec3.Y);
+    tr.assert(signedDistance(c, { x: 0.5, y: 0, z: 0 }) < 0, 'inside radially');
+    tr.assert(signedDistance(c, { x: 0.5, y: 0.5, z: 0 }) < 0, 'inside radially and axially');
+    tr.assert(signedDistance(c, { x: 1.5, y: 0, z: 0 }) > 0, 'outside radially');
+  });
+  tr.test('torus_sdf_has_hole', () => {
+    const t = obstacleTorus({ x: 0, y: 0, z: 0 }, 2, 0.5);
+    tr.assertApprox(signedDistance(t, { x: 2, y: 0, z: 0 }), 0, 1e-3, 'tube surface');
+    tr.assert(signedDistance(t, { x: 0, y: 0, z: 0 }) > 0, 'through the hole');
+  });
+  tr.test('transform_translation_works', () => {
+    const s = obstacleSphere({ x: 10, y: 0, z: 0 }, 1);
+    tr.assert(signedDistance(s, { x: 10, y: 0, z: 0 }) < 0, 'translated inside');
+    tr.assert(signedDistance(s, { x: 0, y: 0, z: 0 }) > 0, 'origin is outside translated sphere');
+  });
+  tr.test('surface_normal_points_outward', () => {
+    const s = obstacleSphere({ x: 0, y: 0, z: 0 }, 1);
+    const n = obstacleNormal(s, { x: 1, y: 0, z: 0 });
+    tr.assert(n.x > 0.5, `normal at +x surface should point along +x, got (${n.x},${n.y},${n.z})`);
+  });
+
+  // -- solver.rs --
+  tr.test('tau_is_positive_and_stable', () => {
+    const config = { nx: 8, ny: 8, nz: 8, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const tau = config.viscosity / (1 / 3) + 0.5;
+    tr.assert(tau > 0.5, `tau > 0.5, got ${tau}`);
+    tr.assert(tau < 5.0, `tau < 5.0, got ${tau}`);
+  });
+  tr.test('empty_grid_stays_close_to_uniform_after_steps', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 50; i++) solver.step();
+    let maxDu = 0;
+    for (let z = 1; z < solver.config.nz - 1; z++) {
+      for (let y = 1; y < solver.config.ny - 1; y++) {
+        for (let x = 1; x < solver.config.nx - 1; x++) {
+          const i = solver.grid.lin(x, y, z);
+          const du = Math.abs(solver.grid.u[i * 3] - 0.05)
+                   + Math.abs(solver.grid.u[i * 3 + 1])
+                   + Math.abs(solver.grid.u[i * 3 + 2]);
+          if (du > maxDu) maxDu = du;
+        }
+      }
+    }
+    tr.assert(maxDu < 1e-3, `max du = ${maxDu}`);
+  });
+  tr.test('sphere_obstacle_makes_flow_slow_down_in_front', () => {
+    const config = { nx: 24, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.05,
+      obstacles: [obstacleSphere({ x: 4, y: 0, z: 0 }, 2)] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 500; i++) solver.step();
+    const cx = solver.config.nx * 0.5;
+    const iFront = solver.grid.lin(Math.round(cx + 1), solver.config.ny >> 1, solver.config.nz >> 1);
+    const iFar  = solver.grid.lin(2, solver.config.ny >> 1, solver.config.nz >> 1);
+    const uFront = solver.grid.u[iFront * 3];
+    const uFar   = solver.grid.u[iFar  * 3];
+    tr.assert(uFront < uFar * 0.95, `stagnation: uFront=${uFront}, uFar=${uFar}`);
+  });
+  tr.test('rasterise_marks_interior_solid', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleSphere({ x: 0, y: 0, z: 0 }, 3)] };
+    const solver = new LbmSolver(config);
+    const iCentre = solver.grid.lin(8, 8, 8);
+    tr.assert(solver.solid[iCentre] === 1, 'sphere centre must be solid');
+    const iCorner = solver.grid.lin(0, 0, 0);
+    tr.assert(solver.solid[iCorner] === 0, 'grid corner must be fluid');
+  });
+
+  // -- drag.rs --
+  tr.test('empty_scene_has_zero_drag', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    const report = computeDrag(solver, 0);
+    tr.assertApprox(report.force.x, 0, 1e-9, 'fx');
+    tr.assertApprox(report.force.y, 0, 1e-9, 'fy');
+    tr.assertApprox(report.force.z, 0, 1e-9, 'fz');
+  });
+
+  // -- streamlines.rs --
+  tr.test('particles_advance_in_flow_direction', () => {
+    const config = { nx: 32, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    const tracer = new StreamlineTracer(4, 8);
+    tracer.seedInlet(solver.config.nx, solver.config.ny, solver.config.nz);
+    const initialX = tracer.particles.map(p => p.position.x);
+    for (let i = 0; i < 50; i++) tracer.step(solver, 1.0);
+    for (let i = 0; i < tracer.particles.length; i++) {
+      tr.assert(tracer.particles[i].position.x > initialX[i],
+        `particle ${i} should move downstream: x0=${initialX[i]} x1=${tracer.particles[i].position.x}`);
+    }
+  });
+  tr.test('tracer_resets_when_out_of_bounds', () => {
+    const config = { nx: 16, ny: 8, nz: 8, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    const tracer = new StreamlineTracer(1, 4);
+    tracer.particles[0].position = { x: 100, y: 0, z: 0 };
+    tracer.step(solver, 1.0);
+    tr.assert(tracer.particles[0].position.x < 5, `should reset to inlet, got x=${tracer.particles[0].position.x}`);
+  });
+  tr.test('obstacles_divert_particles', () => {
+    const config = { nx: 32, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleSphere({ x: 6, y: 0, z: 0 }, 3)] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 200; i++) solver.step();
+    const tracer = new StreamlineTracer(1, 4);
+    tracer.particles[0].position = { x: -10, y: 0.5, z: 0 };
+    for (let i = 0; i < 20; i++) tracer.step(solver, 1.0);
+    tr.assert(Math.abs(tracer.particles[0].position.y) > 0.1,
+      `particle deflected off sphere, y = ${tracer.particles[0].position.y}`);
+  });
+
+  // -- scenes.rs --
+  tr.test('uniform_flow_never_explodes', () => {
+    const r = runUniform(500);
+    tr.assert(r.maxDensity < 1.5, `density should stay near 1, got max=${r.maxDensity}`);
+    tr.assert(r.minDensity > 0.5, `density should stay near 1, got min=${r.minDensity}`);
+    tr.assert(r.maxVelocity < 0.5, `velocity should stay near inlet, got max=${r.maxVelocity}`);
+  });
+  tr.test('sphere_produces_drag_in_flow_direction', () => {
+    const r = runSphere(500);
+    tr.assert(r.drag_x > 0, `expected positive drag on sphere, got ${r.drag_x}`);
+  });
+  tr.test('sphere_density_stays_bounded', () => {
+    const r = runSphere(500);
+    tr.assert(r.maxDensity < 1.5, `rho max ${r.maxDensity} > 1.5`);
+    tr.assert(r.minDensity > 0.5, `rho min ${r.minDensity} < 0.5`);
+  });
+  tr.test('sphere_cd_in_physical_range', () => {
+    const r = runSphere(500);
+    tr.assert(r.cd > 0.1, `cd too low: ${r.cd}`);
+    tr.assert(r.cd < 3.0, `cd too high: ${r.cd}`);
+  });
+}
+
+/* =====================================================================
+   SECTION 11 — Camera + main app
+   ===================================================================== */
+
+function makeCamera(spec) {
+  // Orbit camera centered on the volume.
+  const cx = 0, cy = 0, cz = 0;
+  const r = Math.max(spec.nx, spec.ny, spec.nz) * 1.4;
+  let theta = Math.PI * 0.25; // azimuth
+  let phi = Math.PI * 0.35;   // polar from +Y
+  let dist = r;
+  const target = { x: cx, y: cy, z: cz };
+  function update() {
+    const x = target.x + dist * Math.sin(phi) * Math.cos(theta);
+    const y = target.y + dist * Math.cos(phi);
+    const z = target.z + dist * Math.sin(phi) * Math.sin(theta);
+    return { pos: { x, y, z }, target };
+  }
+  function viewProj(aspect) {
+    const { pos, target } = update();
+    // Simple lookAt.
+    const f = Vec3.normalize(Vec3.sub(target, pos));
+    const r2 = Vec3.normalize(Vec3.cross(f, Vec3.Y));
+    const u = Vec3.cross(r2, f);
+    const view = new Float32Array(16);
+    view[0] = r2.x; view[4] = r2.y; view[8]  = r2.z; view[12] = -Vec3.dot(r2, pos);
+    view[1] = u.x;  view[5] = u.y;  view[9]  = u.z;  view[13] = -Vec3.dot(u, pos);
+    view[2] = -f.x; view[6] = -f.y; view[10] = -f.z; view[14] = Vec3.dot(f, pos);
+    view[3] = 0;    view[7] = 0;    view[11] = 0;    view[15] = 1;
+    // Perspective.
+    const fov = Math.PI / 3;
+    const fH = 1 / Math.tan(fov / 2);
+    const fW = fH / aspect;
+    const zNear = 0.1, zFar = dist * 6;
+    const proj = new Float32Array(16);
+    proj[0]  = fW; proj[5]  = fH; proj[10] = -(zFar + zNear) / (zFar - zNear);
+    proj[11] = -1; proj[14] = -(2 * zFar * zNear) / (zFar - zNear);
+    // Combined: invViewProj = inv(view * proj) = inv(proj) * inv(view)
+    const vp = mulMat4(view, proj);
+    const invVp = invertMat4(vp);
+    return { invViewProj: invVp, cameraPos: [pos.x, pos.y, pos.z] };
+  }
+  return {
+    viewProj,
+    get pos() { return update().pos; },
+    drag(dx, dy) { theta -= dx * 0.005; phi -= dy * 0.005; phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi)); },
+    wheel(d) { dist *= (1 + d * 0.001); dist = Math.max(2, Math.min(500, dist)); },
+    reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.35; dist = Math.max(spec.nx, spec.ny, spec.nz) * 1.4; },
+  };
+}
+
+function mulMat4(a, b) {
+  const o = new Float32Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      o[j * 4 + i] =
+        a[0 * 4 + i] * b[j * 4 + 0] +
+        a[1 * 4 + i] * b[j * 4 + 1] +
+        a[2 * 4 + i] * b[j * 4 + 2] +
+        a[3 * 4 + i] * b[j * 4 + 3];
+    }
+  }
+  return o;
+}
+
+function invertMat4(m) {
+  // Standard 4x4 inverse via cofactors. Sufficient for our static matrices.
+  const inv = new Float32Array(16);
+  const s = [
+    m[0]*m[5]*m[10] + m[4]*m[9]*m[2 ] + m[8 ]*m[1]*m[6 ] - m[0]*m[9]*m[6 ] - m[4]*m[1]*m[10] - m[8 ]*m[5]*m[2 ],
+    m[0]*m[9]*m[7 ] + m[4]*m[1]*m[11] + m[8 ]*m[5]*m[3 ] - m[0]*m[5]*m[11] - m[4]*m[9]*m[3 ] - m[8 ]*m[1]*m[7 ],
+    m[0]*m[5]*m[15] + m[4]*m[13]*m[3] + m[12]*m[1]*m[7 ] - m[0]*m[13]*m[7] - m[4]*m[1 ]*m[15] - m[12]*m[5]*m[3 ],
+    m[0]*m[13]*m[6] + m[4]*m[1]*m[14] + m[8 ]*m[9]*m[7 ] - m[0]*m[9]*m[14] - m[4]*m[13]*m[7] - m[8 ]*m[1]*m[6 ],
+    m[4]*m[10]*m[3] + m[8 ]*m[2]*m[7 ] + m[0]*m[6]*m[11] - m[4]*m[2 ]*m[11] - m[8 ]*m[6]*m[3 ] - m[0]*m[10]*m[7 ],
+    m[4]*m[2 ]*m[15] + m[8 ]*m[6]*m[3 ] + m[0]*m[10]*m[7 ] - m[4]*m[10]*m[3] - m[8 ]*m[2 ]*m[7] - m[0]*m[6]*m[15],
+    m[4]*m[14]*m[3] + m[8 ]*m[2 ]*m[11] + m[0]*m[6]*m[15] - m[4]*m[2 ]*m[15] - m[8 ]*m[6]*m[11] - m[0]*m[14]*m[3 ],
+    m[4]*m[10]*m[15] + m[8 ]*m[14]*m[3] + m[12]*m[2]*m[7 ] - m[4]*m[14]*m[7] - m[8 ]*m[2]*m[15] - m[12]*m[10]*m[3],
+    m[8 ]*m[1]*m[11] + m[0]*m[9]*m[7 ] + m[4]*m[3]*m[10] - m[8 ]*m[9]*m[3 ] - m[0]*m[1]*m[11] - m[4]*m[7]*m[10],
+    m[8 ]*m[9]*m[3 ] + m[0]*m[1]*m[15] + m[4]*m[7]*m[10] - m[8 ]*m[1]*m[15] - m[0]*m[9]*m[7 ] - m[4]*m[3 ]*m[10],
+    m[8 ]*m[1]*m[14] + m[0]*m[13]*m[6] + m[12]*m[5]*m[3 ] - m[8 ]*m[13]*m[3] - m[0]*m[5 ]*m[14] - m[12]*m[1]*m[6 ],
+    m[8 ]*m[13]*m[6] + m[0]*m[5]*m[14] + m[4]*m[2]*m[15] - m[8 ]*m[5]*m[15] - m[0]*m[13]*m[6] - m[4 ]*m[14]*m[2],
+    m[0]*m[9]*m[10] + m[4]*m[2]*m[11] + m[8 ]*m[1]*m[6 ] - m[0]*m[2]*m[10] - m[4]*m[9]*m[6 ] - m[8 ]*m[11]*m[1 ],
+    m[0]*m[2 ]*m[15] + m[4]*m[9]*m[7 ] + m[8 ]*m[11]*m[1] - m[0]*m[9]*m[15] - m[4 ]*m[2]*m[7] - m[8]*m[1]*m[15],
+    m[0]*m[13]*m[7 ] + m[4]*m[1]*m[15] + m[12]*m[5]*m[2 ] - m[0]*m[1]*m[15] - m[4]*m[13]*m[2 ] - m[12]*m[7 ]*m[5],
+    m[0]*m[1]*m[14] + m[4]*m[13]*m[2] + m[8 ]*m[5 ]*m[15] - m[0]*m[13]*m[15] - m[4]*m[1 ]*m[14] - m[8]*m[2]*m[15],
+  ];
+  const det = m[0]*s[0] + m[4]*s[1] + m[8 ]*s[2] + m[12]*s[3];
+  if (Math.abs(det) < 1e-12) throw new Error('mat4 not invertible');
+  const invDet = 1 / det;
+  for (let i = 0; i < 16; i++) inv[i] = s[i] * invDet;
+  return inv;
+}
+
+function showError(msg) {
+  const div = document.createElement('div');
+  div.className = 'err-overlay';
+  div.innerHTML = '<div class="box">' + String(msg).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</div>';
+  document.body.appendChild(div);
+}
+
+/* =====================================================================
+   SECTION 12 — Bootstrap
+   ===================================================================== */
+
+async function main() {
+  const canvas = document.getElementById('render-canvas');
+  const badge = document.getElementById('backend-badge');
+  const fpsEl = document.getElementById('fps');
+  const spsEl = document.getElementById('sps');
+  const stepEl = document.getElementById('step');
+  const spfEl = document.getElementById('spf');
+  const cdEl = document.getElementById('cd');
+  const fxEl = document.getElementById('fx');
+  const uInfInput = document.getElementById('u-inf');
+  const uInfVal = document.getElementById('u-inf-val');
+  const viscInput = document.getElementById('visc');
+  const viscVal = document.getElementById('visc-val');
+  const spfSlider = document.getElementById('spf-slider');
+  const spfVal = document.getElementById('spf-val');
+  const playBtn = document.getElementById('play');
+  const stepBtn = document.getElementById('step-once');
+  const resetBtn = document.getElementById('reset');
+  const selftestBadge = document.getElementById('selftest-badge');
+  const selftestLog = document.getElementById('selftest-log');
+  const runSelftestBtn = document.getElementById('run-selftest');
+
+  const spec = { nx: 32, ny: 24, nz: 24 };
+  const defaultConfig = {
+    nx: spec.nx, ny: spec.ny, nz: spec.nz,
+    u_inf: parseFloat(uInfInput.value),
+    rho0: 1.0,
+    viscosity: parseFloat(viscInput.value),
+    obstacles: [obstacleSphere({ x: 6, y: 0, z: 0 }, 3)],
+  };
+
+  // GPU or CPU compute backend.
+  const forceCpu = location.search.includes('cpu=1');
+  let backend;
+  try {
+    backend = await createComputeBackend(spec, forceCpu);
+  } catch (e) {
+    showError('Failed to create compute backend: ' + e.message);
+    return;
+  }
+  if (backend instanceof WebGPUCompute) {
+    badge.textContent = 'WebGPU compute';
+    badge.classList.add('gpu');
+  } else {
+    badge.textContent = 'CPU compute (WebGL2 render)';
+    badge.classList.add('cpu');
+  }
+
+  // WebGL2 renderer.
+  let renderer;
+  try {
+    renderer = createRenderer(canvas, spec);
+  } catch (e) {
+    showError('WebGL2 renderer init failed: ' + e.message);
+    return;
+  }
+
+  const camera = makeCamera(spec);
+  let playing = false;
+  let stepOnce = false;
+  let simStepsPerFrame = parseInt(spfSlider.value, 10);
+  let lastFrameTime = performance.now();
+  let fps = 0;
+  let simStepsThisSecond = 0;
+  let simStepsPerSecond = 0;
+  let lastStatsT = performance.now();
+  let dragTimer = 0;
+
+  // Streamline tracer (decorative — not rendered in v1 render path).
+  const tracer = new StreamlineTracer(64, 12);
+  tracer.seedInlet(spec.nx, spec.ny, spec.nz);
+
+  // Reset / state.
+  function applyConfig() {
+    const config = {
+      nx: spec.nx, ny: spec.ny, nz: spec.nz,
+      u_inf: parseFloat(uInfInput.value),
+      rho0: 1.0,
+      viscosity: parseFloat(viscInput.value),
+      obstacles: [obstacleSphere({ x: 6, y: 0, z: 0 }, 3)],
+    };
+    uInfVal.textContent = config.u_inf.toFixed(3);
+    viscVal.textContent = config.viscosity.toFixed(3);
+    spfVal.textContent = simStepsPerFrame;
+    backend.reset(config);
+    tracer.seedInlet(spec.nx, spec.ny, spec.nz);
+    dragTimer = 0;
+  }
+  applyConfig();
+
+  // UI handlers.
+  uInfInput.addEventListener('input', () => { uInfVal.textContent = parseFloat(uInfInput.value).toFixed(3); });
+  viscInput.addEventListener('input', () => { viscVal.textContent = parseFloat(viscInput.value).toFixed(3); });
+  uInfInput.addEventListener('change', applyConfig);
+  viscInput.addEventListener('change', applyConfig);
+  spfSlider.addEventListener('input', () => { simStepsPerFrame = parseInt(spfSlider.value, 10); spfVal.textContent = simStepsPerFrame; });
+  playBtn.addEventListener('click', () => {
+    playing = !playing;
+    playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+    playBtn.classList.toggle('primary', playing);
+  });
+  stepBtn.addEventListener('click', () => { stepOnce = true; });
+  resetBtn.addEventListener('click', () => { applyConfig(); });
+
+  // Camera drag/zoom.
+  canvas.addEventListener('mousedown', (e) => {
+    let lastX = e.clientX, lastY = e.clientY;
+    const move = (ev) => {
+      camera.drag(ev.clientX - lastX, ev.clientY - lastY);
+      lastX = ev.clientX; lastY = ev.clientY;
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+  canvas.addEventListener('wheel', (e) => { camera.wheel(e.deltaY); e.preventDefault(); }, { passive: false });
+  window.addEventListener('keydown', (e) => { if (e.key === 'r' || e.key === 'R') camera.reset(spec); });
+
+  // Self-test runner.
+  const tr = new TestRunner();
+  registerTests(tr);
+  async function runSelfTest() {
+    selftestBadge.textContent = 'self-test: running…';
+    selftestBadge.className = 'running';
+    selftestLog.innerHTML = '';
+    const result = await tr.runAll();
+    for (const r of result.log) {
+      const line = document.createElement('div');
+      line.className = r.status === 'PASS' ? 'pass' : 'fail';
+      line.textContent = (r.status === 'PASS' ? '✓ ' : '✗ ') + r.name + (r.error ? ': ' + r.error : '');
+      selftestLog.appendChild(line);
+    }
+    const tag = result.failed === 0 ? 'passed' : 'failed';
+    selftestBadge.textContent = `self-test: ${result.passed}/${result.total} passed (${result.failed} failed)`;
+    selftestBadge.className = tag;
+    console.log(`[selftest] ${result.passed}/${result.total} passed`);
+    if (result.failed > 0) console.table(result.log.filter(r => r.status === 'FAIL'));
+    return result;
+  }
+  runSelftestBtn.addEventListener('click', runSelfTest);
+  if (location.search.includes('selftest=1')) {
+    // Run synchronously on load and freeze UI.
+    runSelfTest().then((r) => {
+      if (r.failed > 0) console.error('SELF-TEST FAILED — app may be broken');
+    });
+  }
+
+  // Main loop.
+  function tick() {
+    const t0 = performance.now();
+    const dt = t0 - lastFrameTime;
+    lastFrameTime = t0;
+    fps = fps * 0.9 + (1000 / Math.max(dt, 1)) * 0.1;
+
+    if (playing || stepOnce) {
+      const steps = playing ? simStepsPerFrame : 1;
+      for (let i = 0; i < steps; i++) backend.step();
+      simStepsThisSecond += steps;
+      stepOnce = false;
+    }
+
+    // Drag recompute every ~10 frames (it's CPU-heavy and JS-side).
+    dragTimer++;
+    let dragReport = null;
+    if (dragTimer >= 10) {
+      dragTimer = 0;
+      try {
+        dragReport = backend.computeDrag ? backend.computeDrag(0) : null;
+        if (backend.computeDragAsync) {
+          backend.computeDragAsync(0).then(r => {
+            cdEl.textContent = r.cd.toFixed(3);
+            fxEl.textContent = r.force.x.toFixed(4);
+          });
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    // Renderer upload + draw.
+    try {
+      // CPU path: synchronous density. WebGPU: readback once in a while.
+      if (backend.density) {
+        renderer.uploadVolume(backend.density);
+      } else if (backend.readback) {
+        backend.readback().then(() => {
+          if (backend.densityCpu) renderer.uploadVolume(backend.densityCpu);
+        });
+      }
+      const aspect = canvas.clientWidth / canvas.clientHeight;
+      const vp = camera.viewProj(aspect);
+      renderer.draw({
+        invViewProj: vp.invViewProj,
+        cameraPos: vp.cameraPos,
+        volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
+        volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
+        densityScale: 8.0,
+        alphaScale: 0.35,
+        steps: 96,
+        fieldMode: 0,
+        solidOpacity: 0.0,
+      });
+    } catch (e) {
+      console.error('Render error:', e);
+    }
+
+    // Stats.
+    if (t0 - lastStatsT > 500) {
+      fpsEl.textContent = fps.toFixed(1);
+      spsEl.textContent = simStepsPerSecond.toFixed(0);
+      stepEl.textContent = backend.stepCount;
+      spfEl.textContent = simStepsPerFrame;
+      if (dragReport) {
+        cdEl.textContent = dragReport.cd.toFixed(3);
+        fxEl.textContent = dragReport.force.x.toFixed(4);
+      } else if (!backend.computeDragAsync) {
+        const r = backend.computeDrag ? backend.computeDrag(0) : null;
+        if (r) {
+          cdEl.textContent = r.cd.toFixed(3);
+          fxEl.textContent = r.force.x.toFixed(4);
+        }
+      }
+      simStepsPerSecond = simStepsThisSecond * (1000 / (t0 - lastStatsT));
+      simStepsThisSecond = 0;
+      lastStatsT = t0;
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  function resize() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    renderer.resize(Math.max(1, w), Math.max(1, h));
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(tick);
+}
+
+window.addEventListener('error', (e) => {
+  console.error('Uncaught error:', e.error || e.message);
+  if (typeof showError === 'function') showError(String(e.error?.stack || e.message));
+});
+
+// Bootstrap only when a real DOM is present (skipped in Node test runner).
+if (typeof document !== 'undefined' && document.getElementById('render-canvas')) {
+  main().catch(e => {
+    console.error(e);
+    showError(e.stack || e.message);
+  });
+}
+</script>
+</body>
+</html>
