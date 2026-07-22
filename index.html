@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r6-2026-07-22 (density 1.0, alpha 0.18 — proper volume)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r7-2026-07-22 (?debug=solid|alpha for diags)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1248,6 +1248,7 @@ uniform vec3 u_volumeMin;
 uniform vec3 u_volumeMax;
 uniform vec3 u_volumeSize;
 uniform float u_densityScale;
+uniform int u_debugMode;
 uniform float u_alphaScale;
 uniform int   u_steps;
 uniform int   u_fieldMode; // 0 = density, 1 = velocity magnitude
@@ -1333,19 +1334,29 @@ void main() {
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
   }
+  // DEBUG r7-alt: u_debugMode 0 = normal, 1 = solid magenta, 2 = red where hit.
+  if (u_debugMode == 1) { outColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
+  if (u_debugMode == 2) {
+    if (accumAlpha > 0.01) outColor = vec4(1.0, 0.2, 0.2, 1.0);
+    else                   outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
   outColor = vec4(accumColor + (1.0 - accumAlpha) * bg, accumAlpha);
 }`;
 
 function createRenderer(canvas, spec) {
   const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
   if (!gl) throw new Error('WebGL2 not available');
-  if (!gl.getExtension('EXT_color_buffer_float')) {
+  const hasColorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
+  const tfl = gl.getExtension('OES_texture_float_linear');
+  console.log('[windsurf] WebGL2 extensions:',
+    'EXT_color_buffer_float=', hasColorBufferFloat,
+    'OES_texture_float_linear=', !!tfl);
+  if (!hasColorBufferFloat) {
     console.warn('EXT_color_buffer_float missing — volume rendering may degrade');
   }
-  // R32F texture sampling needs OES_texture_float_linear for LINEAR filter.
-  const tfl = gl.getExtension('OES_texture_float_linear');
   if (!tfl) {
-    console.warn('OES_texture_float_linear missing — falling back to NEAREST filter for volume');
+    console.warn('OES_texture_float_linear missing — falling back to NEAREST filter for volume (might be black!)');
   }
 
   const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
@@ -1381,6 +1392,7 @@ function createRenderer(canvas, spec) {
     u_steps: gl.getUniformLocation(prog, 'u_steps'),
     u_fieldMode: gl.getUniformLocation(prog, 'u_fieldMode'),
     u_solidOpacity: gl.getUniformLocation(prog, 'u_solidOpacity'),
+    u_debugMode: gl.getUniformLocation(prog, 'u_debugMode'),
   };
 
   // 3D texture for the volume.
@@ -1426,6 +1438,7 @@ function createRenderer(canvas, spec) {
       gl.uniform1i(uniforms.u_steps, state.steps);
       gl.uniform1i(uniforms.u_fieldMode, state.fieldMode);
       gl.uniform1f(uniforms.u_solidOpacity, state.solidOpacity);
+      gl.uniform1i(uniforms.u_debugMode, state.debugMode || 0);
       gl.clearColor(0.043, 0.051, 0.071, 1.0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND);
@@ -1817,6 +1830,13 @@ async function main() {
   const forceCpu = location.search.includes('gpu=1') ? false
                  : location.search.includes('cpu=1') ? true
                  : true;  // default CPU until WebGPU render pass exists
+  // Diagnostic: ?debug=solid renders solid magenta (verifies shader+viewport).
+  //              ?debug=alpha renders red wherever the volume accumulates
+  //                (verifies ray-box intersection + texture sampling).
+  let debugMode = 0;
+  if (location.search.includes('debug=solid')) debugMode = 1;
+  if (location.search.includes('debug=alpha')) debugMode = 2;
+  window.__windsurfDebugMode = debugMode;
   let backend;
   try {
     backend = await createComputeBackend(spec, forceCpu);
@@ -2005,6 +2025,7 @@ async function main() {
         steps: 96,
         fieldMode: 0,
         solidOpacity: 0.0,
+        debugMode,
       });
     } catch (e) {
       console.error('Render error:', e);
