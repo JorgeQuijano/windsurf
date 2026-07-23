@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r16-2026-07-23 (volumetric: subtract rho0 baseline; no more purple tiles)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r17-2026-07-23 (volumetric: gated threshold + alpha cap; zero FP-noise purple)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1340,15 +1340,20 @@ void main() {
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
 
     float val = texture(u_volume, uvw).r;
-    // r16: subtract rho0 (=1.0) baseline so uniform flow yields d≈0
+    // r17: subtract rho0 (=1.0) baseline so uniform flow yields d≈0
     // (no purple tiles). Only density deviations (pressure buildup around
-    // obstacles, wake regions, etc.) render. The viridis colormap's
-    // dark purple at low values is the bug; gating d at zero hides it.
+    // obstacles, wake regions, etc.) render. Threshold bumped from 0.001
+    // to 0.05 so FP-precision noise around val=1.0 (e.g. val=1.00001
+    // → d=0.00005 * 5 = 0.00025, was leaking through and producing
+    // faded-purple haze in bulk uniform regions).
     float d = max(val - 1.0, 0.0) * u_densityScale;
-    if (d < 0.001) continue;
+    if (d < 0.05) continue;
 
     vec3 color = viridis(clamp(d, 0.0, 1.0));
-    float a = clamp(d * u_alphaScale, 0.0, 1.0);
+    // r17: clamp alpha to 0.35 max per fragment so even dense pressure
+    // buildup doesn't fully saturate the volume. Prevents the faded-purple
+    // accumulation that came from 128 marching steps of low-alpha writes.
+    float a = clamp(d * u_alphaScale, 0.0, 0.35);
     accumColor += (1.0 - accumAlpha) * color * a;
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
