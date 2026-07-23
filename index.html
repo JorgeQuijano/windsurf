@@ -45,6 +45,13 @@
       border-left: 1px solid var(--border);
       padding: 16px;
       overflow-y: auto;
+      /* r23: when overflow-y is non-visible, browsers force
+         overflow-x to auto too (a quirky-but-spec'd behavior to
+         prevent clipped scrollbars). Setting overflow-x explicitly
+         to visible is allowed, but in practice it's still honored
+         as auto — so we don't rely on it. Tooltips are rendered
+         in a position:fixed floater appended to <body> instead. */
+      overflow-x: visible;
       display: flex;
       flex-direction: column;
       gap: 14px;
@@ -109,16 +116,20 @@
       cursor: help;
       margin: 0 4px;
       flex: 0 0 auto;
-      position: relative;
       user-select: none;
     }
-    .help:hover::after {
-      content: attr(data-tip);
-      position: absolute;
-      bottom: calc(100% + 6px);
-      right: 0;
+    /* r23: tooltip rendering strategy.
+       The panel uses overflow-y:auto which forces overflow-x to auto
+       too (a browser quirk when one axis is non-visible), so CSS-only
+       positioning inside the panel can't escape the clipping. Instead,
+       a single floating <div class="tt-floater"> is appended to
+       <body> and positioned via JS (mouseenter / mouseleave) with
+       fixed coordinates relative to the viewport. This sidesteps the
+       panel's overflow completely. */
+    .tt-floater {
+      position: fixed;
       width: max-content;
-      max-width: 240px;
+      max-width: 260px;
       padding: 8px 10px;
       background: #11161f;
       color: #d4dae6;
@@ -129,22 +140,21 @@
       border-radius: 4px;
       border: 1px solid #2a3140;
       pointer-events: none;
-      z-index: 10;
+      z-index: 1000;
       box-shadow: 0 4px 12px rgba(0,0,0,0.5);
       white-space: normal;
+      display: none;
     }
-    .help:hover::before {
+    .tt-floater::before {
       content: '';
       position: absolute;
-      bottom: calc(100% + 2px);
-      right: 4px;
+      top: 100%;
+      right: 12px;
       width: 0;
       height: 0;
       border-left: 5px solid transparent;
       border-right: 5px solid transparent;
       border-top: 5px solid #11161f;
-      pointer-events: none;
-      z-index: 10;
     }
     .lbl-text {
       display: inline-flex;
@@ -252,7 +262,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r22-2026-07-23 (UI: hoverable ? tooltips on every slider; plain-English labels)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r23-2026-07-23 (UI: tooltip rendered in body-level floater, never clipped)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2822,6 +2832,41 @@ async function main() {
   });
   stepBtn.addEventListener('click', () => { stepOnce = true; });
   resetBtn.addEventListener('click', () => { applyConfig(); });
+
+  // r23: hoverable tooltip floater. We use JS (instead of pure CSS)
+  // because the panel's overflow-y:auto forces overflow-x:auto too,
+  // which clips any tooltip rendered inside the panel. The floater
+  // is a single <div class="tt-floater"> appended to <body> and
+  // positioned with position:fixed so it escapes ALL clipping.
+  // Each .help span contributes its data-tip text.
+  const ttFloater = document.createElement('div');
+  ttFloater.className = 'tt-floater';
+  document.body.appendChild(ttFloater);
+  function showTip(el) {
+    ttFloater.textContent = el.getAttribute('data-tip') || '';
+    const r = el.getBoundingClientRect();
+    ttFloater.style.display = 'block';
+    // Position above the icon, right-aligned so it doesn't extend
+    // past the right edge of the viewport.
+    const tipRect = ttFloater.getBoundingClientRect();
+    let left = r.right - tipRect.width;
+    let top = r.top - tipRect.height - 8;
+    if (left < 8) left = 8;
+    if (top < 8) top = r.bottom + 8;  // flip below if it would clip top
+    ttFloater.style.left = left + 'px';
+    ttFloater.style.top = top + 'px';
+  }
+  function hideTip() {
+    ttFloater.style.display = 'none';
+  }
+  for (const el of document.querySelectorAll('.help')) {
+    el.addEventListener('mouseenter', () => showTip(el));
+    el.addEventListener('mouseleave', hideTip);
+    // Also support keyboard focus for accessibility (Tab to icon).
+    el.setAttribute('tabindex', '0');
+    el.addEventListener('focus', () => showTip(el));
+    el.addEventListener('blur', hideTip);
+  }
 
   // Camera drag/zoom.
   canvas.addEventListener('mousedown', (e) => {
