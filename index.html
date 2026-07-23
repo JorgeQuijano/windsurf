@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r25-2026-07-23 (streamlines: trail mode = burst | permanent)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r26-2026-07-23 (artifacts: 6 shapes + 3-axis rotation sliders)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -334,6 +334,29 @@
       <div class="control">
         <label><span class="lbl-text">artifact opacity <span class="help" data-tip="How opaque the cube artifact is. 100% = solid white cube (default, no transparency). 0% = completely invisible, only the streamlines remain. Mid values let you see streamlines passing through/around the cube.">?</span></span><span id="opacity-val">100%</span></label>
         <input type="range" id="opacity-slider" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
+        <select id="artifact-shape" style="width:100%;padding:5px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:12px">
+          <option value="box">cube</option>
+          <option value="sphere">sphere</option>
+          <option value="cylinder">cylinder</option>
+          <option value="wedge">wedge</option>
+          <option value="cone">cone</option>
+          <option value="tetrahedron">tetrahedron</option>
+        </select>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">rotate X <span class="help" data-tip="Rotation around the X axis (roll) in degrees. Snap-to-45° on release. Try 45° to see how a tilted cube/wedge affects the wake.">?</span></span><span id="rot-x-val">0°</span></label>
+        <input type="range" id="rot-x" min="0" max="360" step="1" value="0">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">rotate Y <span class="help" data-tip="Rotation around the Y axis (pitch) in degrees. Try Y=45° + Z=45° on a cube to make wind hit a corner instead of a flat face.">?</span></span><span id="rot-y-val">0°</span></label>
+        <input type="range" id="rot-y" min="0" max="360" step="1" value="0">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">rotate Z <span class="help" data-tip="Rotation around the Z axis (yaw) in degrees. Z=45° on a cube presents an edge to the wind instead of a face; combined with Y=45° it presents a corner.">?</span></span><span id="rot-z-val">0°</span></label>
+        <input type="range" id="rot-z" min="0" max="360" step="1" value="0">
       </div>
       <div class="buttons">
         <button id="play" class="primary">▶ Play</button>
@@ -424,6 +447,31 @@ const Mat3 = {
     y: m[3] * v.x + m[4] * v.y + m[5] * v.z,
     z: m[6] * v.x + m[7] * v.y + m[8] * v.z,
   }),
+  // r26: build rotation matrix from three Euler angles in radians
+  // (XYZ order — roll around X, then pitch around Y, then yaw around Z).
+  // Used to wire the rotation sliders (degrees) to the obstacle
+  // transform. Not gimbal-safe, but the slider range 0..360 with
+  // snap-to-45° lets users get out of gimbal lock by switching the
+  // snap step.
+  fromEulerXYZ: (rx, ry, rz) => {
+    const cx = Math.cos(rx), sx = Math.sin(rx);
+    const cy = Math.cos(ry), sy = Math.sin(ry);
+    const cz = Math.cos(rz), sz = Math.sin(rz);
+    // Rx
+    const r00 = 1, r01 = 0, r02 = 0;
+    const r10 = 0, r11 = cx, r12 = -sx;
+    const r20 = 0, r21 = sx, r22 = cx;
+    // Ry * Rx
+    const a00 = cy * r00 + sy * r20, a01 = cy * r01 + sy * r21, a02 = cy * r02 + sy * r22;
+    const a10 = r10,             a11 = r11,             a12 = r12;
+    const a20 = -sy * r00 + cy * r20, a21 = -sy * r01 + cy * r21, a22 = -sy * r02 + cy * r22;
+    // Rz * (Ry * Rx)
+    return [
+      cz * a00 - sz * a10, cz * a01 - sz * a11, cz * a02 - sz * a12,
+      sz * a00 + cz * a10, sz * a01 + cz * a11, sz * a02 + cz * a12,
+      a20,                 a21,                 a22,
+    ];
+  },
 };
 
 /* =====================================================================
@@ -569,6 +617,30 @@ function obstacleTorus(center, major, minor) {
     { x: major, y: minor, z: major }, Mat3.identity(), 'Torus');
 }
 
+// r26: shape factories for the 5 new artifact types. All use scale.x =
+// scale.z = halfExtent and scale.y = halfExtent along the long axis
+// (where applicable), so they can be uniformly resized via the SDF
+// worldToLocal transform. The 'radius' / 'size' parameter is the
+// half-extent in local units (-1..+1).
+
+function obstacleWedge(center, size) {
+  // Triangular prism: 2 (x) × 1 (y) × 2 (z) in local units.
+  return makeObstacle('wedge', { ...center },
+    { x: size, y: size * 0.5, z: size }, Mat3.identity(), 'Wedge');
+}
+
+function obstacleCone(center, radius) {
+  // Right circular cone, axis along local X. height = 2*radius.
+  return makeObstacle('cone', { ...center },
+    { x: radius, y: radius, z: radius }, Mat3.identity(), 'Cone');
+}
+
+function obstacleTetrahedron(center, size) {
+  // Regular tetrahedron, vertex at local +x. size = half-extent.
+  return makeObstacle('tetrahedron', { ...center },
+    { x: size, y: size, z: size }, Mat3.identity(), 'Tetrahedron');
+}
+
 function signedDistance(obs, worldP) {
   const p = worldToLocal(obs.transform, worldP);
   switch (obs.shape) {
@@ -595,6 +667,84 @@ function signedDistance(obs, worldP) {
     case 'torus': {
       const radial = Math.sqrt(p.x * p.x + p.z * p.z) - 1;
       return Math.sqrt(radial * radial + p.y * p.y);
+    }
+    // r26: wedge (triangular prism). Cross-section in the X-Y plane
+    // is a right triangle; extruded along Z. The 'tip' (apex of the
+    // triangle) is at local +x (windward side), so the wind hits the
+    // leading edge first. Useful for airfoil-ish shapes.
+    // For LBM we only need inside/outside, so we approximate the SDF
+    // with plane equations (exact distance to triangle plane edges).
+    case 'wedge': {
+      // Triangle in XY: apex (1,0), corners (-1,-1), (-1,1).
+      // The three edges are planes in 3D; for the 2D triangle we
+      // check if (x,y) is on the "inside" side of each edge.
+      //   Lower edge (1,0)→(-1,-1): y = 0.5*(x-1) = (x-1)/2.
+      //     On the inside (above this line), y >= (x-1)/2 → 2y - x + 1 >= 0.
+      //   Upper edge (1,0)→(-1,1): y = -0.5*(x-1) = -(x-1)/2.
+      //     On the inside (below this line), y <= -(x-1)/2 → 2y + x - 1 <= 0.
+      //     So `1 - x - 2y >= 0` is the inside test.
+      //   Base edge x = -1 (vertical wall).
+      //     On the inside (x >= -1), x + 1 >= 0.
+      const d1 = (-p.x + 2 * p.y + 1) / Math.sqrt(5);  // >= 0 inside
+      const d2 = (-p.x - 2 * p.y + 1) / Math.sqrt(5);  // >= 0 inside
+      const d3 = p.x + 1;                              // >= 0 inside
+      const minPlane = Math.min(d1, d2, d3);
+      // Inside if all three are >= 0.
+      if (minPlane >= 0) return -minPlane;
+      // Outside 2D: distance to the closest edge (planar bound).
+      const dOut2D = Math.hypot(
+        Math.max(-d1, 0), Math.max(-d2, 0), Math.max(-d3, 0)
+      );
+      // Combine with z-extrusion (z in [-1, 1]).
+      const dz = Math.max(Math.abs(p.z) - 1, 0);
+      return Math.sqrt(dOut2D * dOut2D + dz * dz);
+    }
+    // r26: cone. Apex at local +x (windward), base circle at x=-1.
+    case 'cone': {
+      // Project onto axis: x in [-1, 1]. At each x, radius is (1-x)/2.
+      const xClamp = Math.max(-1, Math.min(1, p.x));
+      const rAtX = (1 - xClamp) * 0.5;
+      const radial = Math.sqrt(p.y * p.y + p.z * p.z) - rAtX;
+      // Inside if radial < 0 AND x in [-1, 1].
+      if (radial < 0 && p.x >= -1 && p.x <= 1) {
+        // Inside: SDF is the largest negative distance to any surface.
+        return Math.max(radial, p.x - 1, -p.x - 1);
+      }
+      // Outside: closest of (a) distance to the cone slanted surface
+      // at clamped x, (b) distance to the base disk at x=-1, (c) distance
+      // to the apex point at x=+1.
+      const dBase = (p.x + 1); // distance to base plane (always >= 0 outside base)
+      // Distance from (p.y, p.z) to nearest point on base disk of radius 1.
+      const radialBase = Math.sqrt(p.y * p.y + p.z * p.z);
+      const dBaseDisk = p.x < -1
+        ? Math.hypot(dBase, Math.max(radialBase - 1, 0))
+        : Infinity;
+      const dSlant = (radial > 0 && xClamp > -1 && xClamp < 1)
+        ? radial
+        : Infinity;
+      const dApex = (p.x > 1)
+        ? Math.hypot(p.x - 1, p.y, p.z)
+        : Infinity;
+      return Math.min(dBaseDisk, dSlant, dApex);
+    }
+    // r26: regular tetrahedron. Four face planes. For LBM inside/
+    // outside we only need the sign, not the precise distance.
+    case 'tetrahedron': {
+      // Vertices: (1,1,1), (1,-1,-1), (-1,1,-1), (-1,-1,1).
+      // Four face plane equations (each face passes through 3 of the 4
+      // vertices and is bounded away from the 4th). All face normals
+      // are permutations of (1,1,1)/sqrt(3).
+      const invSqrt3 = 1 / Math.sqrt(3);
+      const d1 = (1 - ( p.x + p.y + p.z)) * invSqrt3;
+      const d2 = (1 - ( p.x - p.y - p.z)) * invSqrt3;
+      const d3 = (1 - (-p.x + p.y - p.z)) * invSqrt3;
+      const d4 = (1 - (-p.x - p.y + p.z)) * invSqrt3;
+      // Inside if all four are >= 0.
+      const minFace = Math.min(d1, d2, d3, d4);
+      if (minFace >= 0) return -minFace;
+      // Outside: distance to nearest face plane (overestimate is fine
+      // for LBM since the solid mask uses signedDistance < 0 only).
+      return -minFace;
     }
     default:
       return Infinity;
@@ -2212,6 +2362,197 @@ function buildCubeMesh(scale, halfExtents, position, colors) {
   return new Float32Array(verts);
 }
 
+// r26: generic mesh builder helper. Given a list of vertices in local
+// space (each a {x,y,z}), a list of triangle indices, a per-vertex
+// normal (or computed via flat-shading), and a single color, returns
+// the same pos+normal+color 9-floats-per-vertex layout that the
+// cube shader expects. Applies the rotation matrix and position
+// offset before emitting.
+function emitMesh(localVerts, triangles, normals, color, rotation, position, scale, halfExtents) {
+  // Apply: world = rotation * (scale.*localVert .* halfExtents) + position
+  const sx = scale.x * halfExtents.x, sy = scale.y * halfExtents.y, sz = scale.z * halfExtents.z;
+  // Rotate the normal too (matrices are orthonormal so transpose = inverse).
+  const out = [];
+  for (let t = 0; t < triangles.length; t += 3) {
+    const i0 = triangles[t], i1 = triangles[t + 1], i2 = triangles[t + 2];
+    const v0 = localVerts[i0], v1 = localVerts[i1], v2 = localVerts[i2];
+    // World position: rotation * (v .* halfExtents * scale) + position.
+    const wx0 = rotation[0]*v0.x*sx + rotation[1]*v0.y*sy + rotation[2]*v0.z*sz + position.x;
+    const wy0 = rotation[3]*v0.x*sx + rotation[4]*v0.y*sy + rotation[5]*v0.z*sz + position.y;
+    const wz0 = rotation[6]*v0.x*sx + rotation[7]*v0.y*sy + rotation[8]*v0.z*sz + position.z;
+    const wx1 = rotation[0]*v1.x*sx + rotation[1]*v1.y*sy + rotation[2]*v1.z*sz + position.x;
+    const wy1 = rotation[3]*v1.x*sx + rotation[4]*v1.y*sy + rotation[5]*v1.z*sz + position.y;
+    const wz1 = rotation[6]*v1.x*sx + rotation[7]*v1.y*sy + rotation[8]*v1.z*sz + position.z;
+    const wx2 = rotation[0]*v2.x*sx + rotation[1]*v2.y*sy + rotation[2]*v2.z*sz + position.x;
+    const wy2 = rotation[3]*v2.x*sx + rotation[4]*v2.y*sy + rotation[5]*v2.z*sz + position.y;
+    const wz2 = rotation[6]*v2.x*sx + rotation[7]*v2.y*sy + rotation[8]*v2.z*sz + position.z;
+    // Flat-shaded normal: cross product of two edges, normalized.
+    const ex1 = wx1 - wx0, ey1 = wy1 - wy0, ez1 = wz1 - wz0;
+    const ex2 = wx2 - wx0, ey2 = wy2 - wy0, ez2 = wz2 - wz0;
+    let nx = ey1 * ez2 - ez1 * ey2;
+    let ny = ez1 * ex2 - ex1 * ez2;
+    let nz = ex1 * ey2 - ey1 * ex2;
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl; ny /= nl; nz /= nl;
+    for (const [wx, wy, wz] of [[wx0, wy0, wz0], [wx1, wy1, wz1], [wx2, wy2, wz2]]) {
+      out.push(wx, wy, wz, nx, ny, nz, color[0], color[1], color[2]);
+    }
+  }
+  return new Float32Array(out);
+}
+
+// r26: sphere mesh. UV-sphere with stacks × slices. Position is in
+// world coords; scale gives radius. rotation is the obstacle's Mat3.
+function buildSphereMesh(scale, radius, position, rotation, color, stacks = 12, slices = 16) {
+  const verts = [];
+  const tris = [];
+  for (let i = 0; i <= stacks; i++) {
+    const phi = (i / stacks) * Math.PI;          // 0..π (south to north pole)
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    for (let j = 0; j <= slices; j++) {
+      const theta = (j / slices) * 2 * Math.PI; // 0..2π
+      const st = Math.sin(theta), ct = Math.cos(theta);
+      // Sphere in local [-1, +1]: x = cp*ct, y = sp, z = cp*st.
+      verts.push({ x: cp * ct, y: sp, z: cp * st });
+    }
+  }
+  for (let i = 0; i < stacks; i++) {
+    for (let j = 0; j < slices; j++) {
+      const a = i * (slices + 1) + j;
+      const b = a + slices + 1;
+      tris.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  // For the cube shader's setUniform u_alpha, the existing renderer is
+  // shape-agnostic. The trick is that buildSphereMesh produces vertices
+  // in local coords scaled by `radius` (uniform scale).
+  return emitMesh(verts, tris, null, color, rotation, position,
+    { x: radius, y: radius, z: radius }, { x: 1, y: 1, z: 1 });
+}
+
+// r26: cylinder mesh. Axis along local X. Top cap at x=+1, bottom at x=-1.
+// Radius 1.
+function buildCylinderMesh(scale, radius, position, rotation, color, slices = 16) {
+  const verts = [];
+  const tris = [];
+  // Side wall: 2 rings at x=-1 and x=+1.
+  for (let j = 0; j <= slices; j++) {
+    const theta = (j / slices) * 2 * Math.PI;
+    const ct = Math.cos(theta), st = Math.sin(theta);
+    verts.push({ x: -1, y: ct, z: st });
+    verts.push({ x:  1, y: ct, z: st });
+  }
+  for (let j = 0; j < slices; j++) {
+    const a = j * 2;
+    tris.push(a, a + 2, a + 1);
+    tris.push(a + 1, a + 2, a + 3);
+  }
+  // Top cap (triangle fan around x=+1 center).
+  const topCenterIdx = verts.length;
+  verts.push({ x: 1, y: 0, z: 0 });
+  const topRingStart = verts.length;
+  for (let j = 0; j <= slices; j++) {
+    const theta = (j / slices) * 2 * Math.PI;
+    verts.push({ x: 1, y: Math.cos(theta), z: Math.sin(theta) });
+  }
+  for (let j = 0; j < slices; j++) {
+    tris.push(topCenterIdx, topRingStart + j + 1, topRingStart + j);
+  }
+  // Bottom cap.
+  const botCenterIdx = verts.length;
+  verts.push({ x: -1, y: 0, z: 0 });
+  const botRingStart = verts.length;
+  for (let j = 0; j <= slices; j++) {
+    const theta = (j / slices) * 2 * Math.PI;
+    verts.push({ x: -1, y: Math.cos(theta), z: Math.sin(theta) });
+  }
+  for (let j = 0; j < slices; j++) {
+    tris.push(botCenterIdx, botRingStart + j, botRingStart + j + 1);
+  }
+  return emitMesh(verts, tris, null, color, rotation, position,
+    { x: radius, y: radius, z: radius }, { x: 1, y: 1, z: 1 });
+}
+
+// r26: wedge mesh. Triangle in XY (apex at +x, base at -1), extruded along Z.
+function buildWedgeMesh(scale, size, position, rotation, color) {
+  const verts = [
+    // Two triangular end caps (at z=-1 and z=+1).
+    // Apex (1,0,-1) and (1,0,+1)
+    { x:  1, y:  0, z: -1 },
+    { x: -1, y: -1, z: -1 },
+    { x: -1, y:  1, z: -1 },
+    { x:  1, y:  0, z:  1 },
+    { x: -1, y:  1, z:  1 },
+    { x: -1, y: -1, z:  1 },
+  ];
+  const tris = [
+    // -z end cap (CCW from -z): apex, top-left, bottom-left.
+    0, 2, 1,
+    // +z end cap (CCW from +z): apex, bottom-left, top-left.
+    3, 4, 5,
+    // Slanted top face (apex to top-left), connects z=-1 to z=+1.
+    0, 1, 5,   0, 5, 3,
+    // Slanted bottom face (apex to bottom-left).
+    0, 4, 2,   0, 3, 4,
+    // Base face (vertical wall at x=-1).
+    1, 2, 4,   1, 4, 5,
+  ];
+  return emitMesh(verts, tris, null, color, rotation, position,
+    { x: size, y: size, z: size }, { x: 1, y: 0.5, z: 1 });
+}
+
+// r26: cone mesh. Apex at (+1, 0, 0), base circle at x=-1.
+function buildConeMesh(scale, radius, position, rotation, color, slices = 16) {
+  const verts = [];
+  const tris = [];
+  // Apex.
+  const apexIdx = 0;
+  verts.push({ x: 1, y: 0, z: 0 });
+  // Side wall ring (at x=-1).
+  const ringStart = verts.length;
+  for (let j = 0; j <= slices; j++) {
+    const theta = (j / slices) * 2 * Math.PI;
+    verts.push({ x: -1, y: Math.cos(theta), z: Math.sin(theta) });
+  }
+  for (let j = 0; j < slices; j++) {
+    tris.push(apexIdx, ringStart + j, ringStart + j + 1);
+  }
+  // Base cap (triangle fan).
+  const baseCenterIdx = verts.length;
+  verts.push({ x: -1, y: 0, z: 0 });
+  const baseRingStart = verts.length;
+  for (let j = 0; j <= slices; j++) {
+    const theta = (j / slices) * 2 * Math.PI;
+    verts.push({ x: -1, y: Math.cos(theta), z: Math.sin(theta) });
+  }
+  for (let j = 0; j < slices; j++) {
+    tris.push(baseCenterIdx, baseRingStart + j + 1, baseRingStart + j);
+  }
+  return emitMesh(verts, tris, null, color, rotation, position,
+    { x: radius, y: radius, z: radius }, { x: 1, y: 1, z: 1 });
+}
+
+// r26: tetrahedron mesh. 4 triangular faces, 4 vertices.
+function buildTetrahedronMesh(scale, size, position, rotation, color) {
+  // Vertices at permutations of (1,1,1) with one coordinate negated.
+  const verts = [
+    { x:  1, y:  1, z:  1 }, // 0
+    { x:  1, y: -1, z: -1 }, // 1
+    { x: -1, y:  1, z: -1 }, // 2
+    { x: -1, y: -1, z:  1 }, // 3
+  ];
+  // Four faces, each a triangle of three of the four vertices.
+  // CCW when viewed from outside.
+  const tris = [
+    0, 2, 1, // face on +x+y+z side
+    0, 1, 3, // face on +x-y+z side
+    0, 3, 2, // face on +x+y-z side
+    1, 2, 3, // face on -x (the "back")
+  ];
+  return emitMesh(verts, tris, null, color, rotation, position,
+    { x: size, y: size, z: size }, { x: 1, y: 1, z: 1 });
+}
+
 function createCubeRenderer(canvas) {
   const gl = canvas.getContext('webgl2', {
     antialias: true, depth: true,
@@ -2390,6 +2731,35 @@ function registerTests(tr) {
     const t = obstacleTorus({ x: 0, y: 0, z: 0 }, 2, 0.5);
     tr.assertApprox(signedDistance(t, { x: 2, y: 0, z: 0 }), 0, 1e-3, 'tube surface');
     tr.assert(signedDistance(t, { x: 0, y: 0, z: 0 }) > 0, 'through the hole');
+  });
+  // r26: SDF tests for new shapes (wedge, cone, tetrahedron).
+  tr.test('wedge_sdf_negative_inside', () => {
+    const w = obstacleWedge({ x: 0, y: 0, z: 0 }, 3);
+    // Apex of the wedge (local +x in the SDF) — but obstacleWedge
+    // flips signs because of worldToLocal. Inside the triangle.
+    tr.assert(signedDistance(w, { x: 0, y: 0, z: 0 }) < 0, 'center inside');
+    tr.assert(signedDistance(w, { x: -2, y: 0, z: 0 }) < 0, 'base region inside');
+    // Far away — must be positive.
+    tr.assert(signedDistance(w, { x: 10, y: 10, z: 10 }) > 0, 'far outside positive');
+  });
+  tr.test('cone_sdf_negative_inside', () => {
+    const c = obstacleCone({ x: 0, y: 0, z: 0 }, 3);
+    tr.assert(signedDistance(c, { x: 0, y: 0, z: 0 }) < 0, 'center inside');
+    tr.assert(signedDistance(c, { x: -2, y: 0, z: 0 }) < 0, 'base region inside');
+    tr.assert(signedDistance(c, { x: 10, y: 10, z: 10 }) > 0, 'far outside positive');
+  });
+  tr.test('tetrahedron_sdf_negative_inside', () => {
+    const t = obstacleTetrahedron({ x: 0, y: 0, z: 0 }, 3);
+    tr.assert(signedDistance(t, { x: 0, y: 0, z: 0 }) < 0, 'center inside');
+    tr.assert(signedDistance(t, { x: 10, y: 10, z: 10 }) > 0, 'far outside positive');
+  });
+  tr.test('rotated_box_sdf_respects_rotation', () => {
+    // Rotate the box 45° around Y. Inside test points should still
+    // be inside (the box is symmetric).
+    const b = obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 });
+    b.transform.rotation = Mat3.fromEulerXYZ(0, Math.PI / 4, 0);
+    tr.assert(signedDistance(b, { x: 0, y: 0, z: 0 }) < 0, 'center still inside after rotation');
+    tr.assert(signedDistance(b, { x: 5, y: 0, z: 0 }) > 0, 'far point still outside');
   });
   tr.test('transform_translation_works', () => {
     const s = obstacleSphere({ x: 10, y: 0, z: 0 }, 1);
@@ -2744,6 +3114,14 @@ async function main() {
   });
   const opacitySlider = document.getElementById('opacity-slider');
   const opacityVal = document.getElementById('opacity-val');
+  // r26: artifact shape selector + rotation sliders.
+  const shapeSelect = document.getElementById('artifact-shape');
+  const rotXSlider = document.getElementById('rot-x');
+  const rotYSlider = document.getElementById('rot-y');
+  const rotZSlider = document.getElementById('rot-z');
+  const rotXVal = document.getElementById('rot-x-val');
+  const rotYVal = document.getElementById('rot-y-val');
+  const rotZVal = document.getElementById('rot-z-val');
   const playBtn = document.getElementById('play');
   const stepBtn = document.getElementById('step-once');
   const resetBtn = document.getElementById('reset');
@@ -2876,13 +3254,55 @@ async function main() {
   }
 
   // Reset / state.
+  // r26: build the obstacle list from the current shape selector +
+  // rotation sliders. Returns an array of length 1 (one artifact).
+  function buildObstacle() {
+    const shape = shapeSelect.value;
+    const rxDeg = parseFloat(rotXSlider.value) || 0;
+    const ryDeg = parseFloat(rotYSlider.value) || 0;
+    const rzDeg = parseFloat(rotZSlider.value) || 0;
+    const rx = rxDeg * Math.PI / 180;
+    const ry = ryDeg * Math.PI / 180;
+    const rz = rzDeg * Math.PI / 180;
+    const rotation = Mat3.fromEulerXYZ(rx, ry, rz);
+    // Position is fixed (user said "stay in position"). Scale gives
+    // half-extent in local units (-1..+1). Default 3 matches the
+    // original cube size.
+    const SIZE = 3;
+    const center = { x: 6, y: 0, z: 0 };
+    let base;
+    switch (shape) {
+      case 'sphere':
+        base = obstacleSphere(center, SIZE);
+        break;
+      case 'cylinder':
+        base = obstacleCylinder(center, SIZE, SIZE, { x: 1, y: 0, z: 0 });
+        break;
+      case 'wedge':
+        base = obstacleWedge(center, SIZE);
+        break;
+      case 'cone':
+        base = obstacleCone(center, SIZE);
+        break;
+      case 'tetrahedron':
+        base = obstacleTetrahedron(center, SIZE);
+        break;
+      case 'box':
+      default:
+        base = obstacleBox(center, { x: SIZE, y: SIZE, z: SIZE });
+        break;
+    }
+    // Apply rotation to whichever base obstacle we built.
+    base.transform.rotation = rotation;
+    return [base];
+  }
   function applyConfig() {
     const config = {
       nx: spec.nx, ny: spec.ny, nz: spec.nz,
       u_inf: parseFloat(uInfInput.value),
       rho0: 1.0,
       viscosity: parseFloat(viscInput.value),
-      obstacles: [obstacleBox({ x: 6, y: 0, z: 0 }, { x: 3, y: 3, z: 3 })],
+      obstacles: buildObstacle(),
     };
     uInfVal.textContent = config.u_inf.toFixed(3);
     viscVal.textContent = config.viscosity.toFixed(3);
@@ -2897,13 +3317,44 @@ async function main() {
       lines.clearSegments();
       lines.addSegment(new Float32Array(0), [0.40, 0.75, 1.00, 0.85]);     // streamlines (empty placeholder, updated per frame)
     }
-    // Refresh the solid cube mesh for the first box obstacle. Other shapes
-    // (sphere/cylinder/torus) keep their wireframe-only rendering.
+    // r26: refresh the artifact mesh for the FIRST obstacle, picking
+    // the right mesh builder by shape. All shapes share the cube
+    // shader/renderer (pos+normal+color 9-floats-per-vertex), so the
+    // renderer is shape-agnostic. The single mesh becomes the visible
+    // artifact; obstacle 2+ (if any) would need a second renderer
+    // instance, but we currently allow only one artifact at a time.
     if (cube) {
-      const boxObs = config.obstacles.find((o) => o.shape === 'box');
-      if (boxObs) {
-        const m = buildCubeMesh(1, boxObs.transform.scale, boxObs.transform.position, CUBE_FACE_COLORS);
-        cube.uploadMesh(m);
+      const obs = config.obstacles[0];
+      if (obs) {
+        const t = obs.transform;
+        const color = [0.92, 0.92, 0.92]; // uniform light gray (r21)
+        let mesh = null;
+        switch (obs.shape) {
+          case 'box':
+            // For box we use the per-face colors builder (legacy path)
+            // to keep the existing renderer's color uniform path stable.
+            mesh = buildCubeMesh(1, t.scale, t.position, CUBE_FACE_COLORS);
+            break;
+          case 'sphere':
+            mesh = buildSphereMesh(1, t.scale.x, t.position, t.rotation, color);
+            break;
+          case 'cylinder':
+            mesh = buildCylinderMesh(1, t.scale.x, t.position, t.rotation, color);
+            break;
+          case 'wedge':
+            mesh = buildWedgeMesh(1, t.scale.x, t.position, t.rotation, color);
+            break;
+          case 'cone':
+            mesh = buildConeMesh(1, t.scale.x, t.position, t.rotation, color);
+            break;
+          case 'tetrahedron':
+            mesh = buildTetrahedronMesh(1, t.scale.x, t.position, t.rotation, color);
+            break;
+          default:
+            mesh = null;
+        }
+        if (mesh) cube.uploadMesh(mesh);
+        else cube._vertexCount = 0;
       } else {
         cube._vertexCount = 0;
       }
@@ -2927,6 +3378,39 @@ async function main() {
     artifactAlpha = parseInt(opacitySlider.value, 10) / 100;
     opacityVal.textContent = opacitySlider.value + '%';
   });
+  // r26: shape + rotation handlers. On any change, rebuild the
+  // obstacle, reset the LBM solver (so the solid mask picks up the
+  // new shape/rotation), reseed streamlines, and update the visible
+  // mesh. Cheap reset is necessary because the voxelized solid mask
+  // depends on shape + rotation.
+  function onArtifactChange() {
+    rotXVal.textContent = rotXSlider.value + '°';
+    rotYVal.textContent = rotYSlider.value + '°';
+    rotZVal.textContent = rotZSlider.value + '°';
+    applyConfig();
+  }
+  // Snap-to-45°: when the user releases the slider, round the value
+  // to the nearest 45° multiple. This makes it easy to reproduce
+  // 'wind hits a corner' (Y=45° + Z=45°) without fiddling with
+  // exact angles.
+  function snapRotation(slider) {
+    const v = parseFloat(slider.value);
+    const snapped = Math.round(v / 45) * 45;
+    if (snapped !== v) {
+      slider.value = String(snapped);
+      onArtifactChange();
+    }
+  }
+  shapeSelect.addEventListener('change', () => {
+    document.getElementById('shape-val').textContent = shapeSelect.value;
+    onArtifactChange();
+  });
+  rotXSlider.addEventListener('input', onArtifactChange);
+  rotYSlider.addEventListener('input', onArtifactChange);
+  rotZSlider.addEventListener('input', onArtifactChange);
+  rotXSlider.addEventListener('change', () => snapRotation(rotXSlider));
+  rotYSlider.addEventListener('change', () => snapRotation(rotYSlider));
+  rotZSlider.addEventListener('change', () => snapRotation(rotZSlider));
   playBtn.textContent = '⏸ Pause';
   playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
