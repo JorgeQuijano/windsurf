@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r12-2026-07-23 (streamlines show wind flow + camera floor clamp + dimmer walls)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r13-2026-07-23 (removed tunnel walls + flow markers; only streamlines + cube)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2504,6 +2504,7 @@ async function main() {
   // cube and the dim tunnel walls, these show the wind actually flowing.
   const tracer = new StreamlineTracer(80, 48);
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
+  window.__windsurfTracer = tracer;
 
   // Reset / state.
   function applyConfig() {
@@ -2520,14 +2521,11 @@ async function main() {
     backend.reset(config);
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     dragTimer = 0;
-    // Refresh the line buffer: tunnel walls (dim gray) + obstacle wireframe
-    // (cyan-blue) + flow direction markers (yellow) + streamline trails
-    // (velocity-color gradient; refreshed every frame).
+    // Refresh the line buffer: just the streamline trails (the wind itself).
+    // The cube is solid; walls/markers were scaffolding and have been
+    // removed — the streamlines ARE the tunnel now.
     if (lines) {
       lines.clearSegments();
-      lines.addSegment(buildTunnelLines(spec), [0.45, 0.50, 0.55, 0.20]);   // dim gray, very dim (walls are scaffolding; the streamlines ARE the tunnel)
-      lines.addSegment(buildObstacleLines(config.obstacles), [0.45, 0.85, 1.0, 1.0]);  // cyan-blue
-      lines.addSegment(buildFlowMarkers(spec), [1.0, 0.85, 0.30, 0.9]);    // yellow wind arrows
       lines.addSegment(new Float32Array(0), [0.40, 0.75, 1.00, 0.85]);     // streamlines (empty placeholder, updated per frame)
     }
     // Refresh the solid cube mesh for the first box obstacle. Other shapes
@@ -2697,15 +2695,13 @@ async function main() {
         cube.draw(vp.viewProj, LIGHT_DIR);
       }
       if (lines) {
-        // Update streamlines every frame (they move). Segment index 3
-        // is the streamline placeholder; rebuild only that one segment.
-        // Only the CPU backend has a solver to sample velocity from;
-        // for the GPU backend we leave the streamline buffer empty.
+        // Update streamlines every frame (they move). The streamlines are
+        // the only segment after the wall/marker removal.
         if (backend.solver) {
           const streamGeom = buildStreamlineLines(tracer, backend.solver);
-          lines.updateSegment(3, streamGeom);
+          lines.updateSegment(0, streamGeom);
         } else {
-          lines.updateSegment(3, new Float32Array(0));
+          lines.updateSegment(0, new Float32Array(0));
         }
         lines.draw(vp.viewProj);
       }
