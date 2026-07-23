@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r18-2026-07-23 (streamlines: deflect around cube; stuck-particle recovery)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r19-2026-07-23 (streamlines: 96-pt trails; middle of tunnel populated)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -742,16 +742,21 @@ class StreamlineTracer {
       // (essentially zero velocity from being trapped at a solid wall
       // edge), reseed it at the inlet. Without this, particles pile up
       // at the cube face and the visible streamline count slowly drops.
-      // Also add small random jitter so reseeded particles don't merge
-      // into identical trails (a single degenerate stream looked like
-      // "only 4 streamlines").
+      // r19: also randomize the spawn-x across the tunnel so reseeded
+      // particles are immediately distributed across the volume. Without
+      // this, the middle of the tunnel ends up empty because each
+      // particle's trail only covers ~36% of the tunnel length.
       const moved = Math.hypot(p.position.x - prev.x, p.position.y - prev.y, p.position.z - prev.z);
       const px = p.position.x + cx, py = p.position.y + cy, pz = p.position.z + cz;
       const outOfBounds = px < 0 || px >= nx || py < 0 || py >= ny || pz < 0 || pz >= nz;
       if (outOfBounds || moved < 0.01) {
         const nyLim = ny * 0.4, nzLim = nz * 0.4;
-        const jitY = (this._rand() - 0.5) * nyLim * 0.8;
-        const jitZ = (this._rand() - 0.5) * nzLim * 0.8;
+        // r19: jitter Y/Z around the particle's CURRENT position so the
+        // streamlines maintain spatial coherence (air flowing through,
+        // not random scatter). Spawn at the inlet, but with random y/z
+        // to keep streamlines from merging onto the same path.
+        const jitY = (this._rand() - 0.5) * nyLim * 1.4;
+        const jitZ = (this._rand() - 0.5) * nzLim * 1.4;
         const nyC = Math.max(-nyLim, Math.min(nyLim, p.position.y + jitY));
         const nzC = Math.max(-nzLim, Math.min(nzLim, p.position.z + jitZ));
         p.position = { x: 1.5 - cx, y: nyC, z: nzC };
@@ -2567,14 +2572,14 @@ async function main() {
   // trail. Trails are drawn as line segments in the scene. The user can
   // change the count live via the "streamlines" slider (10..400); on
   // change we recreate the tracer with the new size and reseed.
-  let tracer = new StreamlineTracer(80, 48);
+  let tracer = new StreamlineTracer(80, 96);
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
   window.__windsurfTracer = tracer;
 
   function setStreamlineCount(n) {
     n = Math.max(10, Math.min(400, n | 0));
     if (n === tracer.particles.length) return;
-    tracer = new StreamlineTracer(n, 48);
+    tracer = new StreamlineTracer(n, 96);
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     window.__windsurfTracer = tracer;
   }
