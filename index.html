@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r19-2026-07-23 (streamlines: 96-pt trails; middle of tunnel populated)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r20-2026-07-23 (streamlines: per-vertex speed→drag colormap, cyan→red CFD style)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1759,13 +1759,63 @@ function buildFlowMarkers(spec) {
 // of points; we draw consecutive pairs as line segments. Because the
 // line renderer is one-segment-one-color, we color by the average speed
 // across the whole trail — fast trails orange, slow trails blue.
+// r20: speed → drag → color map. CFD convention: blue = free stream
+// (no drag), green = mild drag, yellow = moderate, red = high drag /
+// near-stall. We sample the velocity at each trail point and map the
+// magnitude against the free-stream speed U_inf. Speed ratio t = |v|/U_inf
+// in [0, 1]. Drag ratio d = 1 - t (high near the cube where particles
+// slow down). Then map d to a 5-stop turbo-like colormap:
+//   d=0.0 (fast / free stream) → cyan  (0.20, 0.85, 1.00)
+//   d=0.3 (mild slow-down)       → blue  (0.30, 0.55, 0.95)
+//   d=0.6 (significant slow-down)→ green (0.40, 0.85, 0.45)
+//   d=0.8 (high drag / near cube)→ yellow(1.00, 0.85, 0.25)
+//   d=1.0 (stalled / touched cube)→ red  (1.00, 0.25, 0.20)
+const COLOR_RAMP = [
+  [0.20, 0.85, 1.00],  // 0.0 cyan
+  [0.30, 0.55, 0.95],  // 0.3 blue
+  [0.40, 0.85, 0.45],  // 0.6 green
+  [1.00, 0.85, 0.25],  // 0.8 yellow
+  [1.00, 0.25, 0.20],  // 1.0 red
+];
+function speedToColor(speedMag, uInf) {
+  const t = Math.max(0, Math.min(1, speedMag / Math.max(uInf, 1e-6)));
+  const d = 1 - t;
+  // Interpolate between ramp stops.
+  const stops = COLOR_RAMP;
+  const segs = stops.length - 1;
+  const f = d * segs;
+  const i = Math.min(segs - 1, Math.floor(f));
+  const k = f - i;
+  return [
+    stops[i][0] * (1 - k) + stops[i + 1][0] * k,
+    stops[i][1] * (1 - k) + stops[i + 1][1] * k,
+    stops[i][2] * (1 - k) + stops[i + 1][2] * k,
+  ];
+}
+
 function buildStreamlineLines(tracer, solver) {
+  // r20: emit interleaved pos+color geometry. Each vertex is 6 floats
+  // (x, y, z, r, g, b). Line segments interpolate colors smoothly
+  // between trail points so a particle that decelerates near the cube
+  // visually transitions from cyan (free stream) to red (stalled).
   const pts = [];
+  const uInf = solver.config.u_inf;
+  const sampleSpeed = (world) => {
+    const v = sampleVelocity(solver, world);
+    return Math.hypot(v.x, v.y, v.z);
+  };
   for (const trail of tracer.trails) {
     if (trail.length < 2) continue;
     for (let i = 0; i < trail.length - 1; i++) {
       const a = trail[i], b = trail[i + 1];
-      pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      const sa = sampleSpeed(a);
+      const sb = sampleSpeed(b);
+      const ca = speedToColor(sa, uInf);
+      const cb = speedToColor(sb, uInf);
+      pts.push(
+        a.x, a.y, a.z, ca[0], ca[1], ca[2],
+        b.x, b.y, b.z, cb[0], cb[1], cb[2],
+      );
     }
   }
   return new Float32Array(pts);
@@ -1803,19 +1853,31 @@ function streamlinesAvgColor(tracer, solver) {
 // whether the volumetric path produces useful output.
 // =====================================================================
 
+// r20: per-vertex color attribute. When a segment was added via
+// addSegment(arr, color) or updateSegment(index, arr) with a 6-float-
+// per-vertex layout (pos.xyz + color.rgb), the line is colored
+// smoothly along its length. The old 3-float-per-vertex layout still
+// works for the wireframe obstacle etc — they just fall back to the
+// segment-uniform color.
 const LINE_VS = `#version 300 es
 in vec3 a_pos;
+in vec3 a_color;
 uniform mat4 u_viewProj;
+out vec3 v_color;
 void main() {
+  v_color = a_color;
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
 }`;
 
 const LINE_FS = `#version 300 es
 precision mediump float;
-uniform vec4 u_color;
+in vec3 v_color;
+uniform vec4 u_color;  // fallback uniform color for segments without per-vertex colors
+uniform float u_useVertColor;  // 1.0 = use v_color, 0.0 = use u_color
 out vec4 outColor;
 void main() {
-  outColor = u_color;
+  vec3 c = mix(u_color.rgb, v_color, u_useVertColor);
+  outColor = vec4(c, u_color.a);
 }`;
 
 function createLineRenderer(canvas) {
@@ -1840,14 +1902,24 @@ function createLineRenderer(canvas) {
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   const aPos = gl.getAttribLocation(prog, 'a_pos');
+  const aColor = gl.getAttribLocation(prog, 'a_color');
   gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+  // r20: aColor is also enabled; stride 24 = 6 floats (pos+color),
+  // stride 12 = 3 floats (pos only, color comes from uniform).
+  // We bind both vertex attribs as interleaved in the SAME buffer
+  // with a fixed stride chosen per draw (set in drawSegment).
+  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 12, 0);
+  if (aColor >= 0) gl.disableVertexAttribArray(aColor);
   gl.bindVertexArray(null);
 
   const uViewProj = gl.getUniformLocation(prog, 'u_viewProj');
   const uColor = gl.getUniformLocation(prog, 'u_color');
+  const uUseVertColor = gl.getUniformLocation(prog, 'u_useVertColor');
 
-  // Segments: each is { offset, count, color, _arr }. Backed by one buffer.
+  // Segments: each is { offset, count, color, _arr, stride }.
+  // count is in vertices. _arr.length / 3 = vertex count for stride=12
+  // (pos-only), or _arr.length / 6 = vertex count for stride=24
+  // (pos+color interleaved).
   const segments = [];
 
   return {
@@ -1855,8 +1927,13 @@ function createLineRenderer(canvas) {
     addSegment(arr, color) {
       // Append a new segment. _rebuildBuffer reuploads the whole buffer
       // each time (small enough — a few hundred verts total).
+      const stride = arr.length % 6 === 0 && (arr.length / 3) % 2 === 0 ? 24 : 12;
+      // stride 24 = pos+color interleaved (per-vertex color). The
+      // segment's own color uniform is used as alpha source only.
+      // Note: with stride 24, arr.length / 6 is vertex count.
+      const vertCount = stride === 24 ? arr.length / 6 : arr.length / 3;
       const offsetVerts = segments.reduce((n, s) => n + s.count, 0);
-      segments.push({ offset: offsetVerts, count: arr.length / 3, color, _arr: arr });
+      segments.push({ offset: offsetVerts, count: vertCount, color, _arr: arr, stride });
       this._rebuildBuffer();
     },
     clearSegments() {
@@ -1869,8 +1946,11 @@ function createLineRenderer(canvas) {
     // (e.g. streamlines that change every frame).
     updateSegment(index, arr) {
       if (index < 0 || index >= segments.length) return;
+      // r20: detect interleaved pos+color from arr length parity.
+      const stride = (arr.length % 6 === 0 && (arr.length / 3) % 2 === 0) ? 24 : 12;
       segments[index]._arr = arr;
-      segments[index].count = arr.length / 3;
+      segments[index].stride = stride;
+      segments[index].count = stride === 24 ? arr.length / 6 : arr.length / 3;
       // Recompute offsets for segments after this one.
       let off = 0;
       for (let i = 0; i < segments.length; i++) {
@@ -1881,7 +1961,10 @@ function createLineRenderer(canvas) {
     },
     _rebuildBuffer() {
       let total = 0;
-      for (const s of segments) total += s.count * 3;
+      for (const s of segments) {
+        // count is in vertices; total is in floats.
+        total += s.count * (s.stride / 4);
+      }
       const merged = new Float32Array(total);
       let off = 0;
       for (const s of segments) {
@@ -1899,7 +1982,18 @@ function createLineRenderer(canvas) {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       for (const s of segments) {
+        // r20: bind a_pos / a_color with the segment's stride.
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        if (s.stride === 24) {
+          gl.enableVertexAttribArray(aColor);
+          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 24, s.offset * 24);
+          gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 24, s.offset * 24 + 12);
+        } else {
+          if (aColor >= 0) gl.disableVertexAttribArray(aColor);
+          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 12, s.offset * 12);
+        }
         gl.uniform4f(uColor, s.color[0], s.color[1], s.color[2], s.color[3]);
+        gl.uniform1f(uUseVertColor, s.stride === 24 ? 1.0 : 0.0);
         gl.drawArrays(gl.LINES, s.offset, s.count);
       }
       gl.disable(gl.BLEND);
