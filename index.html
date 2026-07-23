@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r30-2026-07-23 (sphere now full sphere — was hemisphere: phi 0..π fixed to phi -π/2..+π/2)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r31-2026-07-23 (removed snap-to-45° on rotation sliders — free 0..360° in 1° steps)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -351,7 +351,7 @@
         </select>
       </div>
       <div class="control">
-        <label><span class="lbl-text">rotate X <span class="help" data-tip="Rotation around the X axis (roll) in degrees. Snap-to-45° on release. Try 45° to see how a tilted cube/wedge affects the wake.">?</span></span><span id="rot-x-val">0°</span></label>
+        <label><span class="lbl-text">rotate X <span class="help" data-tip="Rotation around the X axis (roll) in degrees. Any 0..360° is allowed (1° steps). Try 45° to see how a tilted cube/wedge affects the wake.">?</span></span><span id="rot-x-val">0°</span></label>
         <input type="range" id="rot-x" min="0" max="360" step="1" value="0">
       </div>
       <div class="control">
@@ -454,9 +454,8 @@ const Mat3 = {
   // r26: build rotation matrix from three Euler angles in radians
   // (XYZ order — roll around X, then pitch around Y, then yaw around Z).
   // Used to wire the rotation sliders (degrees) to the obstacle
-  // transform. Not gimbal-safe, but the slider range 0..360 with
-  // snap-to-45° lets users get out of gimbal lock by switching the
-  // snap step.
+  // transform. Not gimbal-safe, but the slider range 0..360 with 1°
+  // steps lets users get out of gimbal lock by tweaking.
   fromEulerXYZ: (rx, ry, rz) => {
     const cx = Math.cos(rx), sx = Math.sin(rx);
     const cy = Math.cos(ry), sy = Math.sin(ry);
@@ -3506,18 +3505,9 @@ async function main() {
     rotZVal.textContent = rotZSlider.value + '°';
     applyConfig();
   }
-  // Snap-to-45°: when the user releases the slider, round the value
-  // to the nearest 45° multiple. This makes it easy to reproduce
-  // 'wind hits a corner' (Y=45° + Z=45°) without fiddling with
-  // exact angles.
-  function snapRotation(slider) {
-    const v = parseFloat(slider.value);
-    const snapped = Math.round(v / 45) * 45;
-    if (snapped !== v) {
-      slider.value = String(snapped);
-      onArtifactChange();
-    }
-  }
+  // r31: snap-to-45° removed (was: snap on release). User asked for
+  // free 0..360° with no jump. The original input event still fires on
+  // every step (1° resolution from step="1" on the slider).
   shapeSelect.addEventListener('change', () => {
     document.getElementById('shape-val').textContent = shapeSelect.value;
     onArtifactChange();
@@ -3525,9 +3515,6 @@ async function main() {
   rotXSlider.addEventListener('input', onArtifactChange);
   rotYSlider.addEventListener('input', onArtifactChange);
   rotZSlider.addEventListener('input', onArtifactChange);
-  rotXSlider.addEventListener('change', () => snapRotation(rotXSlider));
-  rotYSlider.addEventListener('change', () => snapRotation(rotYSlider));
-  rotZSlider.addEventListener('change', () => snapRotation(rotZSlider));
   playBtn.textContent = '⏸ Pause';
   playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
