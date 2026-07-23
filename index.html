@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r32-2026-07-23 (purple tiles at glancing camera angles: density threshold 0.05→0.15 + viridis floor lifted)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r33-2026-07-23 (wind speed display units km/h / mph / lattice toggle + live Cd-vs-wind-speed plot)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -308,9 +308,27 @@
         <div class="row"><span>Cd</span><span id="cd">–</span></div>
         <div class="row"><span>F_x</span><span id="fx">–</span></div>
       </div>
+      <div class="control" style="margin:8px 0 4px;padding:6px 8px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px">
+        <label style="display:flex;justify-content:space-between;align-items:baseline">
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Cd vs wind speed</span>
+          <span style="display:flex;gap:6px;align-items:center">
+            <span id="cd-plot-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">– pts</span>
+            <button type="button" id="cd-plot-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear recorded Cd points">clear</button>
+          </span>
+        </label>
+        <canvas id="cd-plot-canvas" width="400" height="120" style="width:100%;height:120px;display:block;margin-top:4px;background:var(--bg);border-radius:3px"></canvas>
+        <div id="cd-plot-xaxis" style="font-size:9px;color:var(--muted);font-family:ui-monospace,monospace;display:flex;justify-content:space-between;margin-top:2px">
+          <span>0</span><span>–</span>
+        </div>
+      </div>
       <div class="control">
-        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. Default 0.08 is a typical low-speed wind tunnel.">?</span></span><span id="u-inf-val">0.08</span></label>
+        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. The toggle below chooses display units: lattice (raw LBM value, 0.02-0.20), km/h, or mph. The km/h and mph scales are display conventions — LBM has no intrinsic SI units, so we map 0.08 lattice → 40 km/h → 25 mph (a typical low-speed wind tunnel feel).">?</span></span><span id="u-inf-val">40 km/h</span></label>
         <input type="range" id="u-inf" min="0.02" max="0.20" step="0.005" value="0.08">
+        <div class="seg unit-toggle" id="u-inf-unit-toggle" style="margin-top:6px">
+          <button type="button" class="seg-btn" data-unit="lattice">lattice</button>
+          <button type="button" class="seg-btn active" data-unit="kmh">km/h</button>
+          <button type="button" class="seg-btn" data-unit="mph">mph</button>
+        </div>
       </div>
       <div class="control">
         <label><span class="lbl-text">air viscosity <span class="help" data-tip="Kinematic viscosity ν (nu). Controls how 'thick' the air behaves. Lower = thin air, streamlines flow right past the cube. Higher = thick air, more turbulence and wake separation behind the cube. Default 0.030 is roughly air at room temperature.">?</span></span><span id="visc-val">0.030</span></label>
@@ -3475,7 +3493,58 @@ async function main() {
   applyConfig();
 
   // UI handlers.
-  uInfInput.addEventListener('input', () => { uInfVal.textContent = parseFloat(uInfInput.value).toFixed(3); });
+  // r33: wind speed display unit toggle (lattice | km/h | mph). The
+  // slider still stores 0.02..0.20 in lattice units (the LBM-native
+  // value used everywhere internally). The toggle only changes the
+  // LABEL format and the Cd-plot x-axis. Mapping:
+  //   km/h = lattice * 500  → 0.02 → 10, 0.08 → 40, 0.20 → 100
+  //   mph  = lattice * 310  → 0.02 → 6.2, 0.08 → 24.9, 0.20 → 62
+  // Both are display conventions — LBM has no intrinsic SI mapping
+  // because it nondimensionalizes everything. Picked so the default
+  // (lattice=0.08) reads as ~40 km/h, a believable low-speed tunnel.
+  const UINF_UNIT = {
+    lattice: { label: 'lattice', factor: 1, decimals: 3, suffix: '' },
+    kmh:     { label: 'km/h',    factor: 500, decimals: 0, suffix: ' km/h' },
+    mph:     { label: 'mph',     factor: 310, decimals: 0, suffix: ' mph' },
+  };
+  let currentUInfUnit = 'kmh';
+  function formatUInf(latticeValue) {
+    const u = UINF_UNIT[currentUInfUnit];
+    const v = latticeValue * u.factor;
+    return v.toFixed(u.decimals) + u.suffix;
+  }
+  // The existing input listener (below) is the one that updates the
+  // label whenever the slider moves. Override its body by directly
+  // setting textContent after the fact — both listeners fire and the
+  // last one wins. To keep it clean, we wrap the existing handler.
+  function refreshUInfLabel() {
+    uInfVal.textContent = formatUInf(parseFloat(uInfInput.value));
+  }
+  document.querySelectorAll('#u-inf-unit-toggle .seg-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#u-inf-unit-toggle .seg-btn').forEach(
+        b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentUInfUnit = btn.getAttribute('data-unit');
+      refreshUInfLabel();
+      // Re-render Cd plot so x-axis labels switch to the new unit.
+      drawCdPlot();
+    });
+  });
+  // Add a fresh listener on top of the existing one — both fire on
+  // input; the new one runs second and sets the formatted label.
+  uInfInput.addEventListener('input', refreshUInfLabel);
+  // r33: clear the plot when the user starts dragging the wind-speed
+  // slider (or arrow-keys it). Sweeping wind speed is the primary way
+  // to build the Cd curve, and starting fresh per drag avoids stale
+  // samples from earlier configurations muddying the new sweep.
+  // Arrow-key nudges still trigger this — fine, since a single point
+  // after clear is still readable.
+  function clearCdSamplesOnSliderStart() { cdSamples = []; drawCdPlot(); }
+  uInfInput.addEventListener('pointerdown', clearCdSamplesOnSliderStart);
+  uInfInput.addEventListener('keydown', clearCdSamplesOnSliderStart);
+  refreshUInfLabel();
+
   viscInput.addEventListener('input', () => { viscVal.textContent = parseFloat(viscInput.value).toFixed(3); });
   uInfInput.addEventListener('change', applyConfig);
   viscInput.addEventListener('change', applyConfig);
@@ -3523,6 +3592,141 @@ async function main() {
   rotXSlider.addEventListener('input', onArtifactChange);
   rotYSlider.addEventListener('input', onArtifactChange);
   rotZSlider.addEventListener('input', onArtifactChange);
+  // r33: Cd-vs-wind-speed live plot. Records (u∞_lattice, Cd) samples
+  // while the sim runs, renders them as a line chart with a highlighted
+  // current point. Cleared whenever shape or rotation changes (because
+  // Cd depends on shape/rotation, mixing them gives a meaningless
+  // graph). Wind-speed slider changes DON'T clear it — that's the whole
+  // point, sweeping wind speed is how you build up the curve.
+  const cdPlotCanvas = document.getElementById('cd-plot-canvas');
+  const cdPlotStats = document.getElementById('cd-plot-stats');
+  const cdPlotXAxis = document.getElementById('cd-plot-xaxis');
+  const cdPlotClearBtn = document.getElementById('cd-plot-clear');
+  const cdPlotCtx = cdPlotCanvas.getContext('2d');
+  // Set the canvas backing store to match its CSS size × DPR for crisp
+  // rendering on high-DPI displays.
+  function resizeCdPlotCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = cdPlotCanvas.getBoundingClientRect();
+    cdPlotCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    cdPlotCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    cdPlotCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawCdPlot();
+  }
+  window.addEventListener('resize', resizeCdPlotCanvas);
+  let cdSamples = [];   // [{u, cd, t}] — t is wall-clock ms
+  let cdLastRecordT = 0;  // throttle to ~2 Hz so a stable Cd doesn't spam
+  // r33: outlier clamp. Cd values during the transient after a wind-
+  // speed slider change can briefly hit 10+ because the LBM hasn't
+  // equilibrated yet. Without clamping, the first transient sample
+  // would drive the y-axis to ~10 and squash all the meaningful
+  // post-stabilization data into a thin band. 5 is well above any
+  // realistic bluff-body Cd (cube ~1.0-1.5, sphere ~0.5, wedge up to
+  // ~2) so it's a safe ceiling.
+  const CD_MAX_CLAMP = 5.0;
+  function recordCdSample(uLattice, cd) {
+    if (typeof cd !== 'number' || !isFinite(cd)) return;
+    const clamped = Math.min(cd, CD_MAX_CLAMP);
+    const tNow = performance.now();
+    if (cdSamples.length === 0 || (tNow - cdLastRecordT) > 500) {
+      cdSamples.push({ u: uLattice, cd: clamped, t: tNow, raw: cd });
+      cdLastRecordT = tNow;
+      // Cap buffer so we don't grow unbounded if user plays for hours.
+      if (cdSamples.length > 2000) cdSamples.splice(0, 200);
+      drawCdPlot();
+    }
+  }
+  function drawCdPlot() {
+    const w = cdPlotCanvas.clientWidth, h = cdPlotCanvas.clientHeight;
+    cdPlotCtx.clearRect(0, 0, w, h);
+    if (cdSamples.length === 0) {
+      cdPlotCtx.fillStyle = 'rgba(150,150,170,0.5)';
+      cdPlotCtx.font = '11px ui-monospace,monospace';
+      cdPlotCtx.textAlign = 'center';
+      cdPlotCtx.textBaseline = 'middle';
+      cdPlotCtx.fillText('sweep wind speed to record Cd', w / 2, h / 2);
+      cdPlotStats.textContent = '0 pts';
+      return;
+    }
+    // X axis: wind speed in current unit. Y axis: Cd (always unitless).
+    const uMin = 0.02, uMax = 0.20;
+    const uFactor = UINF_UNIT[currentUInfUnit].factor;
+    const xToPx = (u) => ((u - uMin) / (uMax - uMin)) * w;
+    let cdMin = Infinity, cdMax = -Infinity;
+    for (const s of cdSamples) {
+      if (s.cd < cdMin) cdMin = s.cd;
+      if (s.cd > cdMax) cdMax = s.cd;
+    }
+    // Pad y-axis a bit so points don't touch edges.
+    const cdPad = Math.max(0.05, (cdMax - cdMin) * 0.1);
+    cdMin = Math.max(0, cdMin - cdPad);
+    cdMax = cdMax + cdPad;
+    if (cdMax === cdMin) cdMax = cdMin + 0.1;
+    const yToPx = (cd) => h - ((cd - cdMin) / (cdMax - cdMin)) * (h - 4) - 2;
+    // Grid lines.
+    cdPlotCtx.strokeStyle = 'rgba(100,100,120,0.25)';
+    cdPlotCtx.lineWidth = 1;
+    cdPlotCtx.beginPath();
+    for (let i = 0; i <= 4; i++) {
+      const y = (i / 4) * (h - 4) + 2;
+      cdPlotCtx.moveTo(0, y);
+      cdPlotCtx.lineTo(w, y);
+    }
+    cdPlotCtx.stroke();
+    // Line connecting samples in chronological order.
+    cdPlotCtx.strokeStyle = '#7cdcfe'; // accent cyan, matches streamlines
+    cdPlotCtx.lineWidth = 1.5;
+    cdPlotCtx.beginPath();
+    for (let i = 0; i < cdSamples.length; i++) {
+      const x = xToPx(cdSamples[i].u);
+      const y = yToPx(cdSamples[i].cd);
+      if (i === 0) cdPlotCtx.moveTo(x, y);
+      else cdPlotCtx.lineTo(x, y);
+    }
+    cdPlotCtx.stroke();
+    // Highlight the current wind-speed position.
+    const uNow = parseFloat(uInfInput.value);
+    const xNow = xToPx(uNow);
+    cdPlotCtx.strokeStyle = 'rgba(255,200,80,0.4)';
+    cdPlotCtx.setLineDash([3, 3]);
+    cdPlotCtx.beginPath();
+    cdPlotCtx.moveTo(xNow, 0);
+    cdPlotCtx.lineTo(xNow, h);
+    cdPlotCtx.stroke();
+    cdPlotCtx.setLineDash([]);
+    // Y-axis labels (Cd values, top and bottom).
+    cdPlotCtx.fillStyle = 'rgba(200,200,210,0.7)';
+    cdPlotCtx.font = '9px ui-monospace,monospace';
+    cdPlotCtx.textAlign = 'left';
+    cdPlotCtx.textBaseline = 'top';
+    cdPlotCtx.fillText(cdMax.toFixed(2), 2, 2);
+    cdPlotCtx.textBaseline = 'bottom';
+    cdPlotCtx.fillText(cdMin.toFixed(2), 2, h - 2);
+    // X-axis labels (wind speed in current unit, 3 ticks).
+    const unitLabel = UINF_UNIT[currentUInfUnit].label;
+    cdPlotXAxis.innerHTML =
+      `<span>${(uMin * uFactor).toFixed(0)}</span>` +
+      `<span>${((uMin + uMax) / 2 * uFactor).toFixed(0)} ${unitLabel}</span>` +
+      `<span>${(uMax * uFactor).toFixed(0)}</span>`;
+    cdPlotStats.textContent = `${cdSamples.length} pts · Cd∈[${cdMin.toFixed(2)}, ${cdMax.toFixed(2)}]`;
+  }
+  cdPlotClearBtn.addEventListener('click', () => {
+    cdSamples = [];
+    drawCdPlot();
+  });
+  resizeCdPlotCanvas();
+  // Clear samples whenever shape or rotation changes — Cd depends on
+  // both, so mixing them in the same chart is meaningless.
+  function clearCdSamples() { cdSamples = []; drawCdPlot(); }
+  shapeSelect.addEventListener('change', () => {
+    clearCdSamples();
+  });
+  // rotation sliders already call onArtifactChange — wrap to also clear.
+  const _origOnArtifactChange = onArtifactChange;
+  onArtifactChange = function() {
+    _origOnArtifactChange();
+    clearCdSamples();
+  };
   playBtn.textContent = '⏸ Pause';
   playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
@@ -3639,10 +3843,18 @@ async function main() {
       dragTimer = 0;
       try {
         dragReport = backend.computeDrag ? backend.computeDrag(0) : null;
+        // r33: record Cd sample for the live plot. Sync path.
+        if (dragReport && typeof dragReport.cd === 'number') {
+          recordCdSample(parseFloat(uInfInput.value), dragReport.cd);
+        }
         if (backend.computeDragAsync) {
           backend.computeDragAsync(0).then(r => {
             cdEl.textContent = r.cd.toFixed(3);
             fxEl.textContent = r.force.x.toFixed(4);
+            // Async path also feeds the plot.
+            if (r && typeof r.cd === 'number') {
+              recordCdSample(parseFloat(uInfInput.value), r.cd);
+            }
           });
         }
       } catch (e) { /* ignore */ }
