@@ -84,12 +84,73 @@
     .control label {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       color: var(--muted);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
     .control label span { color: var(--accent); font-family: ui-monospace, monospace; text-transform: none; }
+    /* r22: hoverable help icon. Shows the slider's description in a
+       tooltip when hovered. data-tip attribute on the input carries
+       the text; CSS reads it via attr() so each slider is
+       self-documenting without JS wiring. */
+    .help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted);
+      color: var(--panel-2);
+      font-size: 10px;
+      font-weight: 700;
+      cursor: help;
+      margin: 0 4px;
+      flex: 0 0 auto;
+      position: relative;
+      user-select: none;
+    }
+    .help:hover::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 6px);
+      right: 0;
+      width: max-content;
+      max-width: 240px;
+      padding: 8px 10px;
+      background: #11161f;
+      color: #d4dae6;
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.4;
+      text-align: left;
+      border-radius: 4px;
+      border: 1px solid #2a3140;
+      pointer-events: none;
+      z-index: 10;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      white-space: normal;
+    }
+    .help:hover::before {
+      content: '';
+      position: absolute;
+      bottom: calc(100% + 2px);
+      right: 4px;
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-top: 5px solid #11161f;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .lbl-text {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+    }
     input[type="range"] {
       width: 100%;
       accent-color: var(--accent);
@@ -191,7 +252,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r21-2026-07-23 (artifact: uniform white cube; opacity slider 0..100%)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r22-2026-07-23 (UI: hoverable ? tooltips on every slider; plain-English labels)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -202,23 +263,23 @@
         <div class="row"><span>F_x</span><span id="fx">–</span></div>
       </div>
       <div class="control">
-        <label>u_inf <span id="u-inf-val">0.08</span></label>
+        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. Default 0.08 is a typical low-speed wind tunnel.">?</span></span><span id="u-inf-val">0.08</span></label>
         <input type="range" id="u-inf" min="0.02" max="0.20" step="0.005" value="0.08">
       </div>
       <div class="control">
-        <label>viscosity ν <span id="visc-val">0.030</span></label>
+        <label><span class="lbl-text">air viscosity <span class="help" data-tip="Kinematic viscosity ν (nu). Controls how 'thick' the air behaves. Lower = thin air, streamlines flow right past the cube. Higher = thick air, more turbulence and wake separation behind the cube. Default 0.030 is roughly air at room temperature.">?</span></span><span id="visc-val">0.030</span></label>
         <input type="range" id="visc" min="0.005" max="0.10" step="0.005" value="0.030">
       </div>
       <div class="control">
-        <label>streamlines <span id="streamline-count-val">80</span></label>
+        <label><span class="lbl-text">streamlines <span class="help" data-tip="How many streamlines to draw. Each streamline is a trail of dots showing the path one parcel of air follows through the tunnel. More streamlines = denser flow visualization but slower FPS. The color of each trail point encodes its speed (cyan=fast, red=slow/high drag).">?</span></span><span id="streamline-count-val">80</span></label>
         <input type="range" id="streamline-count" min="10" max="400" step="10" value="80">
       </div>
       <div class="control">
-        <label>sim steps/frame <span id="spf-val">1</span></label>
+        <label><span class="lbl-text">sim steps/frame <span class="help" data-tip="How many simulation time-steps to run per rendered frame. 0 = paused (visual only), 1 = realtime speed, higher = fast-forward. Higher values make the simulation converge faster but use more CPU per frame.">?</span></span><span id="spf-val">1</span></label>
         <input type="range" id="spf-slider" min="0" max="20" step="1" value="1">
       </div>
       <div class="control">
-        <label>artifact opacity <span id="opacity-val">100%</span></label>
+        <label><span class="lbl-text">artifact opacity <span class="help" data-tip="How opaque the cube artifact is. 100% = solid white cube (default, no transparency). 0% = completely invisible, only the streamlines remain. Mid values let you see streamlines passing through/around the cube.">?</span></span><span id="opacity-val">100%</span></label>
         <input type="range" id="opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="buttons">
