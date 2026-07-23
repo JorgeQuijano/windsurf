@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r13-2026-07-23 (removed tunnel walls + flow markers; only streamlines + cube)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r14-2026-07-23 (streamlines slider 10..400 live)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -208,6 +208,10 @@
       <div class="control">
         <label>viscosity ν <span id="visc-val">0.030</span></label>
         <input type="range" id="visc" min="0.005" max="0.10" step="0.005" value="0.030">
+      </div>
+      <div class="control">
+        <label>streamlines <span id="streamline-count-val">80</span></label>
+        <input type="range" id="streamline-count" min="10" max="400" step="10" value="80">
       </div>
       <div class="control">
         <label>sim steps/frame <span id="spf-val">1</span></label>
@@ -2393,6 +2397,8 @@ async function main() {
   const viscVal = document.getElementById('visc-val');
   const spfSlider = document.getElementById('spf-slider');
   const spfVal = document.getElementById('spf-val');
+  const streamCountSlider = document.getElementById('streamline-count');
+  const streamCountVal = document.getElementById('streamline-count-val');
   const playBtn = document.getElementById('play');
   const stepBtn = document.getElementById('step-once');
   const resetBtn = document.getElementById('reset');
@@ -2498,13 +2504,21 @@ async function main() {
   let lastStatsT = performance.now();
   let dragTimer = 0;
 
-  // Streamline tracer — 80 streamlines, each carrying a 48-point trail.
-  // Trails are drawn as line segments in the scene, with velocity-color
-  // gradient (slow=dark blue, fast=bright orange). Together with the
-  // cube and the dim tunnel walls, these show the wind actually flowing.
-  const tracer = new StreamlineTracer(80, 48);
+  // Streamline tracer — initial 80 streamlines, each carrying a 48-point
+  // trail. Trails are drawn as line segments in the scene. The user can
+  // change the count live via the "streamlines" slider (10..400); on
+  // change we recreate the tracer with the new size and reseed.
+  let tracer = new StreamlineTracer(80, 48);
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
   window.__windsurfTracer = tracer;
+
+  function setStreamlineCount(n) {
+    n = Math.max(10, Math.min(400, n | 0));
+    if (n === tracer.particles.length) return;
+    tracer = new StreamlineTracer(n, 48);
+    tracer.seedInlet(spec.nx, spec.ny, spec.nz);
+    window.__windsurfTracer = tracer;
+  }
 
   // Reset / state.
   function applyConfig() {
@@ -2548,6 +2562,7 @@ async function main() {
   uInfInput.addEventListener('change', applyConfig);
   viscInput.addEventListener('change', applyConfig);
   spfSlider.addEventListener('input', () => { simStepsPerFrame = parseInt(spfSlider.value, 10); spfVal.textContent = simStepsPerFrame; });
+  streamCountSlider.addEventListener('input', () => { streamCountVal.textContent = streamCountSlider.value; setStreamlineCount(parseInt(streamCountSlider.value, 10)); });
   playBtn.textContent = '⏸ Pause';
   playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
