@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r20-2026-07-23 (streamlines: per-vertex speed→drag colormap, cyan→red CFD style)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r21-2026-07-23 (artifact: uniform white cube; opacity slider 0..100%)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -216,6 +216,10 @@
       <div class="control">
         <label>sim steps/frame <span id="spf-val">1</span></label>
         <input type="range" id="spf-slider" min="0" max="20" step="1" value="1">
+      </div>
+      <div class="control">
+        <label>artifact opacity <span id="opacity-val">100%</span></label>
+        <input type="range" id="opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="buttons">
         <button id="play" class="primary">▶ Play</button>
@@ -2026,12 +2030,13 @@ precision mediump float;
 in vec3 v_normal;
 in vec3 v_color;
 uniform vec3 u_lightDir;
+uniform float u_alpha;  // r21: artifact opacity slider (1.0 = solid)
 out vec4 outColor;
 void main() {
   // Half-Lambert keeps the back faces from going pitch black.
   float ndl = dot(normalize(v_normal), normalize(u_lightDir));
   float lit = 0.45 + 0.55 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
-  outColor = vec4(v_color * lit, 1.0);
+  outColor = vec4(v_color * lit, u_alpha);
 }`;
 
 // Build 6 faces of a cube centered at origin, side length 2 (will be
@@ -2095,6 +2100,7 @@ function createCubeRenderer(canvas) {
 
   const uViewProj = gl.getUniformLocation(prog, 'u_viewProj');
   const uLightDir = gl.getUniformLocation(prog, 'u_lightDir');
+  const uAlpha = gl.getUniformLocation(prog, 'u_alpha');
 
   return {
     gl, prog, vao, buf,
@@ -2103,15 +2109,26 @@ function createCubeRenderer(canvas) {
       gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
       this._vertexCount = arr.length / 9;
     },
-    draw(viewProj, lightDir) {
+    draw(viewProj, lightDir, alpha = 1.0) {
       gl.useProgram(prog);
       gl.bindVertexArray(vao);
       gl.uniformMatrix4fv(uViewProj, false, viewProj);
       gl.uniform3f(uLightDir, lightDir[0], lightDir[1], lightDir[2]);
+      gl.uniform1f(uAlpha, alpha);
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
+      // r21: enable alpha blending when the slider is < 1.0 so the
+      // cube is transparent. Disable when solid so it doesn't blend
+      // with the volumetric / streamlines behind it.
+      if (alpha < 0.999) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      } else {
+        gl.disable(gl.BLEND);
+      }
       gl.drawArrays(gl.TRIANGLES, 0, this._vertexCount);
       gl.disable(gl.DEPTH_TEST);
+      if (alpha < 0.999) gl.disable(gl.BLEND);
     },
     _vertexCount: 0,
   };
@@ -2557,6 +2574,8 @@ async function main() {
   const spfVal = document.getElementById('spf-val');
   const streamCountSlider = document.getElementById('streamline-count');
   const streamCountVal = document.getElementById('streamline-count-val');
+  const opacitySlider = document.getElementById('opacity-slider');
+  const opacityVal = document.getElementById('opacity-val');
   const playBtn = document.getElementById('play');
   const stepBtn = document.getElementById('step-once');
   const resetBtn = document.getElementById('reset');
@@ -2636,16 +2655,19 @@ async function main() {
   } catch (e) {
     console.warn('Cube renderer init failed:', e);
   }
-  // 6 face colors (R,G,B) — chosen to read clearly against the dark bg and
-  // teal volume: +x green, -x magenta, +y bright yellow, -y dark blue,
-  // +z cyan, -z orange. The cube reads as a real 3D object immediately.
+  // r21: single color for all 6 cube faces (per user request). The
+  // previous per-face rainbow made it hard to tell at a glance whether
+  // the cube was a single object; uniform white reads as a clean
+  // "test artifact" against the dark background. Lit normally by the
+  // half-Lambert lighting in CUBE_FS so the faces still look distinct
+  // (different lighting on different normals).
   const CUBE_FACE_COLORS = [
-    [0.35, 0.85, 0.45],  // +x (right, windward face): green
-    [0.85, 0.55, 0.20],  // -x (left, leeward face): amber (was magenta; confusing as 'debug' on some camera angles)
-    [1.00, 0.95, 0.40],  // +y (top): yellow
-    [0.30, 0.45, 0.85],  // -y (bottom): blue
-    [0.40, 0.75, 0.95],  // +z (front): cyan
-    [0.95, 0.55, 0.25],  // -z (back): orange
+    [0.92, 0.92, 0.92],  // +x
+    [0.92, 0.92, 0.92],  // -x
+    [0.92, 0.92, 0.92],  // +y
+    [0.92, 0.92, 0.92],  // -y
+    [0.92, 0.92, 0.92],  // +z
+    [0.92, 0.92, 0.92],  // -z
   ];
   // Fixed light direction (world space): from above-right-front.
   const LIGHT_DIR = [0.5, 0.8, 0.3];
@@ -2721,6 +2743,15 @@ async function main() {
   viscInput.addEventListener('change', applyConfig);
   spfSlider.addEventListener('input', () => { simStepsPerFrame = parseInt(spfSlider.value, 10); spfVal.textContent = simStepsPerFrame; });
   streamCountSlider.addEventListener('input', () => { streamCountVal.textContent = streamCountSlider.value; setStreamlineCount(parseInt(streamCountSlider.value, 10)); });
+  // r21: artifact opacity slider. Slider is in 0..100% (matches the
+  // visual mental model); convert to 0..1 alpha for the shader. 100%
+  // = fully opaque (no blending); lower values blend the cube with
+  // what's behind it.
+  let artifactAlpha = parseInt(opacitySlider.value, 10) / 100;
+  opacitySlider.addEventListener('input', () => {
+    artifactAlpha = parseInt(opacitySlider.value, 10) / 100;
+    opacityVal.textContent = opacitySlider.value + '%';
+  });
   playBtn.textContent = '⏸ Pause';
   playBtn.classList.toggle('primary', playing);
   playBtn.addEventListener('click', () => {
@@ -2864,8 +2895,11 @@ async function main() {
       window.__windsurfLastState.viewProj = vp.viewProj;
       // Solid cube mesh — drawn between volumetric and wireframe so the
       // wireframe edges outline the same cube the user sees in solid form.
+      // r21: pass artifactAlpha (from the opacity slider) to the cube
+      // draw call so the user can dial transparency from 0 (invisible)
+      // to 100% (fully solid).
       if (cube && cube._vertexCount > 0) {
-        cube.draw(vp.viewProj, LIGHT_DIR);
+        cube.draw(vp.viewProj, LIGHT_DIR, artifactAlpha);
       }
       if (lines) {
         // Update streamlines every frame (they move). The streamlines are
