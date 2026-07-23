@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r15-2026-07-23 (cube -x face: magenta→amber, debug magenta→gray)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r16-2026-07-23 (volumetric: subtract rho0 baseline; no more purple tiles)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1340,7 +1340,11 @@ void main() {
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
 
     float val = texture(u_volume, uvw).r;
-    float d = val * u_densityScale;
+    // r16: subtract rho0 (=1.0) baseline so uniform flow yields d≈0
+    // (no purple tiles). Only density deviations (pressure buildup around
+    // obstacles, wake regions, etc.) render. The viridis colormap's
+    // dark purple at low values is the bug; gating d at zero hides it.
+    float d = max(val - 1.0, 0.0) * u_densityScale;
     if (d < 0.001) continue;
 
     vec3 color = viridis(clamp(d, 0.0, 1.0));
@@ -2691,8 +2695,8 @@ async function main() {
           cameraPos: vp.cameraPos,
           volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
           volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
-          densityScale: 0.25,   // r10: tuned so bulk flow shows as faint teal, sphere hole reads as darker
-          alphaScale: 0.08,     // product = 0.02 per sample → accumAlpha ≈ 0.92 (opaque bulk, hole visible)
+          densityScale: 5.0,    // r16: scale up after baseline subtraction. d = (val-1)*5 → max ≈ 2.5 → viridis teal-green for pressure regions, 0 (skipped) for bulk.
+          alphaScale: 0.20,     // r16: higher alpha per step since baseline subtraction removes bulk contribution; cumulative alpha ≈ 0.40 max where there IS pressure buildup.
           steps: 128,          // r9: doubled steps so the ray can resolve interior structure.
           fieldMode: 0,
           solidOpacity: 0.0,
