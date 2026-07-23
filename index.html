@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r27-2026-07-23 (artifacts: 6 shapes + 3-axis rotation sliders + streamline opacity)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r28-2026-07-23 (rotation sliders actually rotate the cube mesh — fix)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2350,28 +2350,98 @@ void main() {
 
 // Build 6 faces of a cube centered at origin, side length 2 (will be
 // scaled at draw time). Returns flat Float32Array of pos+normal+color.
-function buildCubeMesh(scale, halfExtents, position, colors) {
-  // scale, halfExtents: {x,y,z}, position: {x,y,z}, colors: array of 6 [r,g,b]
+function buildCubeMesh(scale, halfExtents, position, colors, rotation) {
+  // r28: cube now honors the rotation matrix passed in from buildObstacle().
+  // Before r28, buildCubeMesh signature was (scale, halfExtents, position,
+  // colors) — rotation was silently dropped, so the X/Y/Z sliders had no
+  // visible effect on the solid mesh even though the LBM solid mask was
+  // correctly rasterizing a rotated box (so Cd/Fx DID change). The wireframe
+  // obstacle edge renderer already applied rotation via applyTransformToLines;
+  // only the solid cube mesh was affected. Fix: build the cube the same way
+  // the other shapes do — define local-space verts + per-face normals, then
+  // let emitMesh apply rotation * (scale.*localVert.*halfExtents) + position
+  // to both positions AND normals.
   const hx = halfExtents.x * scale, hy = halfExtents.y * scale, hz = halfExtents.z * scale;
-  const px = position.x, py = position.y, pz = position.z;
-  // 6 faces: +x, -x, +y, -y, +z, -z. Each face: 2 triangles = 6 verts.
-  const faces = [
-    { n: [ 1, 0, 0], c: colors[0], v: [[ hx,-hy,-hz],[ hx, hy,-hz],[ hx, hy, hz],[ hx,-hy, hz]] },
-    { n: [-1, 0, 0], c: colors[1], v: [[-hx,-hy, hz],[-hx, hy, hz],[-hx, hy,-hz],[-hx,-hy,-hz]] },
-    { n: [ 0, 1, 0], c: colors[2], v: [[-hx, hy, hz],[ hx, hy, hz],[ hx, hy,-hz],[-hx, hy,-hz]] },
-    { n: [ 0,-1, 0], c: colors[3], v: [[-hx,-hy,-hz],[ hx,-hy,-hz],[ hx,-hy, hz],[-hx,-hy, hz]] },
-    { n: [ 0, 0, 1], c: colors[4], v: [[-hx,-hy, hz],[ hx,-hy, hz],[ hx, hy, hz],[-hx, hy, hz]] },
-    { n: [ 0, 0,-1], c: colors[5], v: [[ hx,-hy,-hz],[-hx,-hy,-hz],[-hx, hy,-hz],[ hx, hy,-hz]] },
+  // 6 faces as triangles (each face = 2 tris). Local verts at ±halfExtent.
+  // Per-face flat normal (so Phong shading highlights each face distinctly).
+  const localVerts = [
+    // +x face
+    { x: hx, y:-hy, z:-hz }, { x: hx, y: hy, z:-hz }, { x: hx, y: hy, z: hz }, { x: hx, y:-hy, z: hz },
+    // -x face
+    { x:-hx, y:-hy, z: hz }, { x:-hx, y: hy, z: hz }, { x:-hx, y: hy, z:-hz }, { x:-hx, y:-hy, z:-hz },
+    // +y face
+    { x:-hx, y: hy, z: hz }, { x: hx, y: hy, z: hz }, { x: hx, y: hy, z:-hz }, { x:-hx, y: hy, z:-hz },
+    // -y face
+    { x:-hx, y:-hy, z:-hz }, { x: hx, y:-hy, z:-hz }, { x: hx, y:-hy, z: hz }, { x:-hx, y:-hy, z: hz },
+    // +z face
+    { x:-hx, y:-hy, z: hz }, { x: hx, y:-hy, z: hz }, { x: hx, y: hy, z: hz }, { x:-hx, y: hy, z: hz },
+    // -z face
+    { x: hx, y:-hy, z:-hz }, { x:-hx, y:-hy, z:-hz }, { x:-hx, y: hy, z:-hz }, { x: hx, y: hy, z:-hz },
   ];
-  const verts = [];
-  for (const f of faces) {
-    const [a, b, c, d] = f.v;
-    // Triangle 1: a, b, c
-    for (const v of [a, b, c]) verts.push(v[0]+px, v[1]+py, v[2]+pz, f.n[0], f.n[1], f.n[2], f.c[0], f.c[1], f.c[2]);
-    // Triangle 2: a, c, d
-    for (const v of [a, c, d]) verts.push(v[0]+px, v[1]+py, v[2]+pz, f.n[0], f.n[1], f.n[2], f.c[0], f.c[1], f.c[2]);
+  // Per-face flat normal (matches what the pre-r28 cube produced).
+  const faceNormals = [
+    [ 1, 0, 0], [-1, 0, 0], [ 0, 1, 0], [ 0,-1, 0], [ 0, 0, 1], [ 0, 0,-1],
+  ];
+  // Per-vertex flat normals: 4 verts per face, same normal for all 4.
+  const normals = [];
+  for (let i = 0; i < 6; i++) {
+    const n = faceNormals[i];
+    for (let j = 0; j < 4; j++) normals.push(n[0], n[1], n[2]);
   }
-  return new Float32Array(verts);
+  // Triangle indices: 2 tris per face, 6 faces = 12 tris = 36 verts.
+  const triangles = [];
+  for (let f = 0; f < 6; f++) {
+    const o = f * 4;
+    triangles.push(o, o+1, o+2, o, o+2, o+3);
+  }
+  // Flatten colors so each vertex gets its face's color.
+  // emitMesh expects a single color per shape; we replicate the per-face
+  // coloring by manually building the array and applying rotation+position
+  // ourselves (same math as emitMesh, but per-vertex color).
+  const flatColors = [];
+  for (let f = 0; f < 6; f++) {
+    const c = colors[f];
+    for (let j = 0; j < 4; j++) flatColors.push(c[0], c[1], c[2]);
+  }
+  // Apply rotation + position. Same math as emitMesh.
+  const rot = rotation || [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const verts = [];
+  for (let i = 0; i < localVerts.length; i++) {
+    const v = localVerts[i];
+    const wx = rot[0]*v.x + rot[1]*v.y + rot[2]*v.z + position.x;
+    const wy = rot[3]*v.x + rot[4]*v.y + rot[5]*v.z + position.y;
+    const wz = rot[6]*v.x + rot[7]*v.y + rot[8]*v.z + position.z;
+    const n = [normals[i*3], normals[i*3+1], normals[i*3+2]];
+    // Normal also needs rotation (transpose = inverse for orthonormal).
+    const nx = rot[0]*n[0] + rot[1]*n[1] + rot[2]*n[2];
+    const ny = rot[3]*n[0] + rot[4]*n[1] + rot[5]*n[2];
+    const nz = rot[6]*n[0] + rot[7]*n[1] + rot[8]*n[2];
+    verts.push(
+      wx, wy, wz,
+      nx, ny, nz,
+      flatColors[i*3], flatColors[i*3+1], flatColors[i*3+2]
+    );
+  }
+  // Now expand to per-triangle layout (cube mesh needs 36 verts not 24).
+  // The localVerts list above has 4 verts per face (24 verts), but we need
+  // each face to be 2 triangles of 3 verts each (6 verts per face = 36).
+  const out = [];
+  for (let f = 0; f < 6; f++) {
+    const o = f * 4;
+    // Tri 1: 0, 1, 2
+    for (const k of [0, 1, 2]) {
+      out.push(verts[(o+k)*9], verts[(o+k)*9+1], verts[(o+k)*9+2],
+               verts[(o+k)*9+3], verts[(o+k)*9+4], verts[(o+k)*9+5],
+               verts[(o+k)*9+6], verts[(o+k)*9+7], verts[(o+k)*9+8]);
+    }
+    // Tri 2: 0, 2, 3
+    for (const k of [0, 2, 3]) {
+      out.push(verts[(o+k)*9], verts[(o+k)*9+1], verts[(o+k)*9+2],
+               verts[(o+k)*9+3], verts[(o+k)*9+4], verts[(o+k)*9+5],
+               verts[(o+k)*9+6], verts[(o+k)*9+7], verts[(o+k)*9+8]);
+    }
+  }
+  return new Float32Array(out);
 }
 
 // r26: generic mesh builder helper. Given a list of vertices in local
@@ -3355,7 +3425,10 @@ async function main() {
           case 'box':
             // For box we use the per-face colors builder (legacy path)
             // to keep the existing renderer's color uniform path stable.
-            mesh = buildCubeMesh(1, t.scale, t.position, CUBE_FACE_COLORS);
+            // r28: pass t.rotation — buildCubeMesh now honors it (was being
+            // silently dropped, leaving the mesh axis-aligned even when
+            // the rotation sliders moved).
+            mesh = buildCubeMesh(1, t.scale, t.position, CUBE_FACE_COLORS, t.rotation);
             break;
           case 'sphere':
             mesh = buildSphereMesh(1, t.scale.x, t.position, t.rotation, color);
