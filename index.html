@@ -24,8 +24,16 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
       font-size: 13px;
-      overflow: hidden;
     }
+    /* r24: overflow:hidden applied to <html> only (not body). When
+       <body> has overflow:hidden, browsers (Chromium/Safari/Firefox)
+       use it as the containing block for position:fixed children,
+       and the body's clip applies to those children too — which
+       cut our tooltip floater at the body's right edge. Moving the
+       overflow to <html> keeps the no-scroll behavior but lets
+       fixed children escape. */
+    html { overflow: hidden; }
+    body { overflow: visible; }
     #app {
       display: grid;
       grid-template-columns: 1fr 280px;
@@ -262,7 +270,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r23-2026-07-23 (UI: tooltip rendered in body-level floater, never clipped)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r24-2026-07-23 (UI: tooltip now escapes body overflow:hidden)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
