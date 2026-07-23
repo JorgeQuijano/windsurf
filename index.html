@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r26-2026-07-23 (artifacts: 6 shapes + 3-axis rotation sliders)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r27-2026-07-23 (artifacts: 6 shapes + 3-axis rotation sliders + streamline opacity)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -334,6 +334,10 @@
       <div class="control">
         <label><span class="lbl-text">artifact opacity <span class="help" data-tip="How opaque the cube artifact is. 100% = solid white cube (default, no transparency). 0% = completely invisible, only the streamlines remain. Mid values let you see streamlines passing through/around the cube.">?</span></span><span id="opacity-val">100%</span></label>
         <input type="range" id="opacity-slider" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">streamline opacity <span class="help" data-tip="How opaque the wind streamlines are. 100% = vivid flow visualization (default). 50% = subtle tracer that lets the volumetric density underneath show through. 0% = invisible streamlines, only the volumetric pressure field remains. Useful for decluttering when you have many streamlines or want to focus on the colormap.">?</span></span><span id="stream-opacity-val">100%</span></label>
+        <input type="range" id="stream-opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="control">
         <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -2222,9 +2226,17 @@ function createLineRenderer(canvas) {
   // (pos-only), or _arr.length / 6 = vertex count for stride=24
   // (pos+color interleaved).
   const segments = [];
+  // r27: global alpha multiplier for streamlines. 1.0 = use segment
+  // color's alpha as-is; 0.5 = half; 0 = invisible. Applied in draw().
+  let _streamAlphaMul = 1.0;
 
   return {
     gl, prog, vao, buf,
+    // r27: set the global alpha multiplier. Called from the
+    // 'streamline opacity' slider. <1.0 makes streamlines more
+    // transparent; 0 hides them entirely. Replaces the per-segment
+    // alpha in u_color.a at draw time.
+    setStreamAlpha(value) { _streamAlphaMul = Math.max(0, Math.min(1, value)); },
     addSegment(arr, color) {
       // Append a new segment. _rebuildBuffer reuploads the whole buffer
       // each time (small enough — a few hundred verts total).
@@ -2293,7 +2305,7 @@ function createLineRenderer(canvas) {
           if (aColor >= 0) gl.disableVertexAttribArray(aColor);
           gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 12, s.offset * 12);
         }
-        gl.uniform4f(uColor, s.color[0], s.color[1], s.color[2], s.color[3]);
+        gl.uniform4f(uColor, s.color[0], s.color[1], s.color[2], s.color[3] * _streamAlphaMul);
         gl.uniform1f(uUseVertColor, s.stride === 24 ? 1.0 : 0.0);
         gl.drawArrays(gl.LINES, s.offset, s.count);
       }
@@ -3114,6 +3126,11 @@ async function main() {
   });
   const opacitySlider = document.getElementById('opacity-slider');
   const opacityVal = document.getElementById('opacity-val');
+  // r27: streamline opacity slider. Same pattern as artifact opacity:
+  // 0..100% → 0..1 alpha multiplier. Applied at draw time to the
+  // segment color alpha (line renderer's setStreamAlpha).
+  const streamOpacitySlider = document.getElementById('stream-opacity-slider');
+  const streamOpacityVal = document.getElementById('stream-opacity-val');
   // r26: artifact shape selector + rotation sliders.
   const shapeSelect = document.getElementById('artifact-shape');
   const rotXSlider = document.getElementById('rot-x');
@@ -3187,6 +3204,11 @@ async function main() {
   try {
     lines = createLineRenderer(canvas);
     window.__windsurfLines = lines;
+    // r27: push the current streamline-opacity slider value into the
+    // freshly-created renderer. The slider might have been moved
+    // before init completed (e.g. browser restored the previous value
+    // from sessionStorage on a hot reload).
+    lines.setStreamAlpha(parseInt(streamOpacitySlider.value, 10) / 100);
   } catch (e) {
     console.warn('Line renderer init failed:', e);
   }
@@ -3378,6 +3400,18 @@ async function main() {
     artifactAlpha = parseInt(opacitySlider.value, 10) / 100;
     opacityVal.textContent = opacitySlider.value + '%';
   });
+  // r27: streamline opacity slider. Reads/writes the global line
+  // renderer (exposed as window.__windsurfLines after applyConfig()
+  // has run). On the very first input event before init completes
+  // it's a no-op — the next applyConfig() will pick up the slider
+  // value via the closure-captured parseInt below.
+  streamOpacitySlider.addEventListener('input', () => {
+    const a = parseInt(streamOpacitySlider.value, 10) / 100;
+    streamOpacityVal.textContent = streamOpacitySlider.value + '%';
+    if (window.__windsurfLines) window.__windsurfLines.setStreamAlpha(a);
+  });
+  // Push the initial slider value into the renderer once applyConfig()
+  // has wired it up. Done with a one-shot after-init hook.
   // r26: shape + rotation handlers. On any change, rebuild the
   // obstacle, reset the LBM solver (so the solid mask picks up the
   // new shape/rotation), reseed streamlines, and update the visible
