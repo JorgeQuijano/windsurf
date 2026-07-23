@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r11-2026-07-23 (solid cube obstacle in wind tunnel + tunnel walls + flow markers; invertMat4 fix)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r12-2026-07-23 (streamlines show wind flow + camera floor clamp + dimmer walls)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -679,20 +679,31 @@ class StreamlineTracer {
   }
 
   seedInlet(nx, ny, nz) {
+    // Evenly tile the inlet plane with N=particleCount streamlines on a
+    // jittered grid — better coverage than pure-random for visualization.
+    const n = this.particles.length;
+    const cols = Math.ceil(Math.sqrt(n * (nx / ny)));
+    const rows = Math.ceil(n / cols);
     let state = 0x12345 >>> 0;
-    for (const p of this.particles) {
+    const rand = () => {
       state = (Math.imul(state, 1103515245) + 12345) >>> 0;
-      // skip rx
-      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
-      const ry = state / 0xFFFFFFFF;
-      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
-      const rz = state / 0xFFFFFFFF;
-      p.position = {
-        x: 1.5 - nx * 0.5,
-        y: (ry - 0.5) * (ny * 0.8),
-        z: (rz - 0.5) * (nz * 0.8),
-      };
+      return state / 0xFFFFFFFF;
+    };
+    let i = 0;
+    for (let r = 0; r < rows && i < n; r++) {
+      for (let c = 0; c < cols && i < n; c++) {
+        const jy = (rand() - 0.5) * 0.7;
+        const jz = (rand() - 0.5) * 0.7;
+        const fy = (r + 0.5 + jy) / rows;
+        const fz = (c + 0.5 + jz) / cols;
+        this.particles[i++].position = {
+          x: 1.5 - nx * 0.5,
+          y: (fy - 0.5) * (ny * 0.85),
+          z: (fz - 0.5) * (nz * 0.85),
+        };
+      }
     }
+    // If we somehow didn't fill, just clear and start over.
     for (const t of this.trails) t.length = 0;
   }
 
@@ -1676,6 +1687,48 @@ function buildFlowMarkers(spec) {
   return new Float32Array([...inlet, ...outlet]);
 }
 
+// Build line geometry for all streamline trails. Each trail is a series
+// of points; we draw consecutive pairs as line segments. Because the
+// line renderer is one-segment-one-color, we color by the average speed
+// across the whole trail — fast trails orange, slow trails blue.
+function buildStreamlineLines(tracer, solver) {
+  const pts = [];
+  for (const trail of tracer.trails) {
+    if (trail.length < 2) continue;
+    for (let i = 0; i < trail.length - 1; i++) {
+      const a = trail[i], b = trail[i + 1];
+      pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+  return new Float32Array(pts);
+}
+
+// Compute the average trail speed (for coloring). Returns one color per
+// trail — but since the line renderer draws one segment one color, we
+// need to either (a) draw each trail as its own segment, or (b) average
+// across all trails. We do (b) — pick one global color that represents
+// the wind's overall state. If you want per-trail color, refactor the
+// line renderer to support per-segment color from a buffer attribute.
+// For now we return a single average-color Float32Array of 4.
+function streamlinesAvgColor(tracer, solver) {
+  // Approximate by sampling the head velocity of each trail.
+  let sumMag = 0, count = 0;
+  for (let i = 0; i < tracer.particles.length; i++) {
+    const p = tracer.particles[i];
+    const v = sampleVelocity(solver, p);
+    sumMag += Math.hypot(v.x, v.y, v.z);
+    count++;
+  }
+  const avg = count > 0 ? sumMag / count : 0;
+  // Map [0, 0.15] -> [blue, orange]. avg is in LBM units (u_inf typically).
+  const t = Math.min(1, avg / 0.15);
+  // Blue -> cyan -> orange ramp.
+  const r = 0.15 + (1.00 - 0.15) * t;
+  const g = 0.50 + (0.65 - 0.50) * t;
+  const b = 0.95 + (0.30 - 0.95) * t;
+  return [r, g, b, 0.95];
+}
+
 // =====================================================================
 // Wireframe obstacle renderer. Lines only. This is the reliable visual
 // layer: you will ALWAYS see the obstacle geometry, regardless of
@@ -1742,6 +1795,21 @@ function createLineRenderer(canvas) {
       segments.length = 0;
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
+    },
+    // Update one segment in place (index-based). Reuploads the full
+    // buffer with the new array. Use for per-frame dynamic content
+    // (e.g. streamlines that change every frame).
+    updateSegment(index, arr) {
+      if (index < 0 || index >= segments.length) return;
+      segments[index]._arr = arr;
+      segments[index].count = arr.length / 3;
+      // Recompute offsets for segments after this one.
+      let off = 0;
+      for (let i = 0; i < segments.length; i++) {
+        segments[i].offset = off;
+        off += segments[i].count;
+      }
+      this._rebuildBuffer();
     },
     _rebuildBuffer() {
       let total = 0;
@@ -2127,14 +2195,28 @@ function registerTests(tr) {
    ===================================================================== */
 
 function makeCamera(spec) {
-  // Orbit camera centered on the volume.
+  // Orbit camera centered on the volume. The volume's floor sits at
+  // y = -spec.ny / 2 in world space; we clamp the camera so the user
+  // can never dip below the floor (no seeing underneath the tunnel).
   const cx = 0, cy = 0, cz = 0;
   const r = Math.max(spec.nx, spec.ny, spec.nz) * 1.4;
   let theta = Math.PI * 0.25; // azimuth
-  let phi = Math.PI * 0.35;   // polar from +Y
+  let phi = Math.PI * 0.28;   // polar from +Y (eye-level above the tunnel)
   let dist = r;
   const target = { x: cx, y: cy, z: cz };
+  const floorY = -spec.ny / 2;
+  const FLOOR_MARGIN = 0.5;
+  function clampPhi() {
+    // Camera y = target.y + dist * cos(phi). Require camY >= floorY + margin.
+    // => cos(phi) >= (floorY + margin - target.y) / dist
+    const minCos = (floorY + FLOOR_MARGIN - target.y) / dist;
+    if (minCos >= 1) { phi = 0; return; }     // camera must be at floor already
+    if (minCos <= -1) return;                 // no clamp possible (dist too small)
+    const maxPhi = Math.acos(minCos);
+    if (phi > maxPhi) phi = maxPhi;
+  }
   function update() {
+    clampPhi();
     const x = target.x + dist * Math.sin(phi) * Math.cos(theta);
     const y = target.y + dist * Math.cos(phi);
     const z = target.z + dist * Math.sin(phi) * Math.sin(theta);
@@ -2187,7 +2269,7 @@ function makeCamera(spec) {
     get pos() { return update().pos; },
     drag(dx, dy) { theta -= dx * 0.005; phi -= dy * 0.005; phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi)); },
     wheel(d) { dist *= (1 + d * 0.001); dist = Math.max(2, Math.min(500, dist)); },
-    reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.35; dist = Math.max(spec.nx, spec.ny, spec.nz) * 1.4; },
+    reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = Math.max(spec.nx, spec.ny, spec.nz) * 1.4; },
   };
 }
 
@@ -2416,8 +2498,11 @@ async function main() {
   let lastStatsT = performance.now();
   let dragTimer = 0;
 
-  // Streamline tracer (decorative — not rendered in v1 render path).
-  const tracer = new StreamlineTracer(64, 12);
+  // Streamline tracer — 80 streamlines, each carrying a 48-point trail.
+  // Trails are drawn as line segments in the scene, with velocity-color
+  // gradient (slow=dark blue, fast=bright orange). Together with the
+  // cube and the dim tunnel walls, these show the wind actually flowing.
+  const tracer = new StreamlineTracer(80, 48);
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
 
   // Reset / state.
@@ -2436,12 +2521,14 @@ async function main() {
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     dragTimer = 0;
     // Refresh the line buffer: tunnel walls (dim gray) + obstacle wireframe
-    // (cyan-blue) + flow direction markers (yellow).
+    // (cyan-blue) + flow direction markers (yellow) + streamline trails
+    // (velocity-color gradient; refreshed every frame).
     if (lines) {
       lines.clearSegments();
-      lines.addSegment(buildTunnelLines(spec), [0.45, 0.50, 0.55, 0.35]);   // dim gray, dim
+      lines.addSegment(buildTunnelLines(spec), [0.45, 0.50, 0.55, 0.20]);   // dim gray, very dim (walls are scaffolding; the streamlines ARE the tunnel)
       lines.addSegment(buildObstacleLines(config.obstacles), [0.45, 0.85, 1.0, 1.0]);  // cyan-blue
       lines.addSegment(buildFlowMarkers(spec), [1.0, 0.85, 0.30, 0.9]);    // yellow wind arrows
+      lines.addSegment(new Float32Array(0), [0.40, 0.75, 1.00, 0.85]);     // streamlines (empty placeholder, updated per frame)
     }
     // Refresh the solid cube mesh for the first box obstacle. Other shapes
     // (sphere/cylinder/torus) keep their wireframe-only rendering.
@@ -2529,6 +2616,10 @@ async function main() {
     if (playing || stepOnce) {
       const steps = playing ? simStepsPerFrame : 1;
       for (let i = 0; i < steps; i++) backend.step();
+      // Advect the streamline tracer through the same velocity field.
+      // dt=3.0 makes each tracer step large enough that 48-point trails
+      // span many cells of the tunnel — visible curves, not dots.
+      if (backend.solver) tracer.step(backend.solver, 3.0);
       simStepsThisSecond += steps;
       stepOnce = false;
     }
@@ -2606,6 +2697,16 @@ async function main() {
         cube.draw(vp.viewProj, LIGHT_DIR);
       }
       if (lines) {
+        // Update streamlines every frame (they move). Segment index 3
+        // is the streamline placeholder; rebuild only that one segment.
+        // Only the CPU backend has a solver to sample velocity from;
+        // for the GPU backend we leave the streamline buffer empty.
+        if (backend.solver) {
+          const streamGeom = buildStreamlineLines(tracer, backend.solver);
+          lines.updateSegment(3, streamGeom);
+        } else {
+          lines.updateSegment(3, new Float32Array(0));
+        }
         lines.draw(vp.viewProj);
       }
     } catch (e) {
