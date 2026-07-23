@@ -131,6 +131,30 @@ if (!shaderOk) {
 }
 console.log('[preflight] GLSL reserved-word scan: OK');
 
+// r32: purple-tile regression guard. The volumetric fragment shader
+// gates each voxel on `d < THRESHOLD → continue;` to suppress FP-noise
+// density leaks from bulk-flow regions. If someone drops the threshold
+// back below 0.10, glancing-angle camera views will accumulate purple
+// tiles again. Extract the constant from FRAG_SRC and fail if it's
+// lower than 0.10. (Looks for `d < <num>` right after a comment about
+// baseline/threshold so we don't false-positive on unrelated < compares.)
+const thresholdMatch = fragSrc?.match(/if\s*\(\s*d\s*<\s*([0-9]+\.?[0-9]*)\s*\)/);
+let purpleTileGuardOk = true;
+if (!thresholdMatch) {
+  console.error('\n  ✗ FRAG_SRC: could not find density threshold `d < N` guard.');
+  purpleTileGuardOk = false;
+} else {
+  const thresh = parseFloat(thresholdMatch[1]);
+  if (thresh < 0.10) {
+    console.error(`\n  ✗ FRAG_SRC: density threshold ${thresh} too low (< 0.10). ` +
+      `Purple tiles will return at glancing camera angles. Bump to ≥ 0.15.`);
+    purpleTileGuardOk = false;
+  } else {
+    console.log(`[preflight] volumetric threshold = ${thresh} (purple-tile guard: OK)`);
+  }
+}
+if (!purpleTileGuardOk) process.exit(2);
+
 // Stub browser globals so the bootstrap short-circuits.
 const ctx = vm.createContext({
   console,
