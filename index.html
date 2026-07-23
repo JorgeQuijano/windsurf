@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r29-2026-07-23 (sphere reads as a complete sphere — half-Lambert ambient 0.45→0.60, sphere tessellation 12×16→24×32)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r30-2026-07-23 (sphere now full sphere — was hemisphere: phi 0..π fixed to phi -π/2..+π/2)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2488,15 +2488,18 @@ function emitMesh(localVerts, triangles, normals, color, rotation, position, sca
 
 // r26: sphere mesh. UV-sphere with stacks × slices. Position is in
 // world coords; scale gives radius. rotation is the obstacle's Mat3.
-// r29: bumped default tessellation 12×16 → 24×32 (4× triangles) so the
-// flat-shaded sphere reads as a smooth round shape instead of "bright
-// polygonal top dome + flat bottom dome" — the user perceived that
-// as half the sphere missing.
+// r29: bumped default tessellation 12×16 → 24×32 (4× triangles).
+// r30: phi parameterization was 0..π which produced a HEMISPHERE (both
+// poles at y=0, top dome at y=+radius), not a full sphere. The user
+// saw the flat y=0 ring as a horizontal cut and streamlines passing
+// through the empty bottom half. Fixed to phi ∈ [-π/2, +π/2] so the
+// sphere spans y ∈ [-radius, +radius].
 function buildSphereMesh(scale, radius, position, rotation, color, stacks = 24, slices = 32) {
   const verts = [];
   const tris = [];
   for (let i = 0; i <= stacks; i++) {
-    const phi = (i / stacks) * Math.PI;          // 0..π (south to north pole)
+    // Phi from -π/2 (south pole) to +π/2 (north pole) → y from -1 to +1.
+    const phi = (i / stacks - 0.5) * Math.PI;
     const sp = Math.sin(phi), cp = Math.cos(phi);
     for (let j = 0; j <= slices; j++) {
       const theta = (j / slices) * 2 * Math.PI; // 0..2π
