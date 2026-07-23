@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r28-2026-07-23 (rotation sliders actually rotate the cube mesh — fix)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r29-2026-07-23 (sphere reads as a complete sphere — half-Lambert ambient 0.45→0.60, sphere tessellation 12×16→24×32)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2342,9 +2342,12 @@ uniform vec3 u_lightDir;
 uniform float u_alpha;  // r21: artifact opacity slider (1.0 = solid)
 out vec4 outColor;
 void main() {
-  // Half-Lambert keeps the back faces from going pitch black.
+  // Half-Lambert keeps the back faces from going pitch black. r29:
+  // bumped ambient from 0.45 to 0.60 so the dark side reads as ~60%
+  // brightness rather than ~50%, which makes the sphere read as a
+  // single shape instead of "bright top + invisible bottom".
   float ndl = dot(normalize(v_normal), normalize(u_lightDir));
-  float lit = 0.45 + 0.55 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
+  float lit = 0.60 + 0.40 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
   outColor = vec4(v_color * lit, u_alpha);
 }`;
 
@@ -2485,7 +2488,11 @@ function emitMesh(localVerts, triangles, normals, color, rotation, position, sca
 
 // r26: sphere mesh. UV-sphere with stacks × slices. Position is in
 // world coords; scale gives radius. rotation is the obstacle's Mat3.
-function buildSphereMesh(scale, radius, position, rotation, color, stacks = 12, slices = 16) {
+// r29: bumped default tessellation 12×16 → 24×32 (4× triangles) so the
+// flat-shaded sphere reads as a smooth round shape instead of "bright
+// polygonal top dome + flat bottom dome" — the user perceived that
+// as half the sphere missing.
+function buildSphereMesh(scale, radius, position, rotation, color, stacks = 24, slices = 32) {
   const verts = [];
   const tris = [];
   for (let i = 0; i <= stacks; i++) {
