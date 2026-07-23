@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r17-2026-07-23 (volumetric: gated threshold + alpha cap; zero FP-noise purple)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r18-2026-07-23 (streamlines: deflect around cube; stuck-particle recovery)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -680,19 +680,25 @@ class StreamlineTracer {
     }
     this.trailLength = trailLength;
     this.trails = Array.from({ length: particleCount }, () => []);
+    // r18: deterministic PRNG so reseeded particles jitter apart (and
+    // self-test runs are reproducible).
+    this._randState = (0xABCDE ^ (particleCount * 2654435761)) >>> 0;
+  }
+  _rand() {
+    this._randState = (Math.imul(this._randState, 1664525) + 1013904223) >>> 0;
+    return this._randState / 0xFFFFFFFF;
   }
 
   seedInlet(nx, ny, nz) {
     // Evenly tile the inlet plane with N=particleCount streamlines on a
     // jittered grid — better coverage than pure-random for visualization.
+    // r18: use the tracer's PRNG (set in constructor) so successive
+    // reseeds produce different jitter patterns and streamlines don't
+    // merge onto identical paths after stuck-recovery reseeds.
     const n = this.particles.length;
     const cols = Math.ceil(Math.sqrt(n * (nx / ny)));
     const rows = Math.ceil(n / cols);
-    let state = 0x12345 >>> 0;
-    const rand = () => {
-      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
-      return state / 0xFFFFFFFF;
-    };
+    const rand = () => this._rand();
     let i = 0;
     for (let r = 0; r < rows && i < n; r++) {
       for (let c = 0; c < cols && i < n; c++) {
@@ -716,6 +722,7 @@ class StreamlineTracer {
     const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
     for (let idx = 0; idx < this.particles.length; idx++) {
       const p = this.particles[idx];
+      const prev = { x: p.position.x, y: p.position.y, z: p.position.z };
       const k1 = sampleVelocity(solver, p.position);
       const mid = {
         x: p.position.x + 0.5 * dt * k1.x,
@@ -731,12 +738,23 @@ class StreamlineTracer {
       this.trails[idx].push({ x: p.position.x, y: p.position.y, z: p.position.z });
       if (this.trails[idx].length > this.trailLength) this.trails[idx].shift();
 
+      // r18: stuck-particle recovery. If a particle moves <0.01 units
+      // (essentially zero velocity from being trapped at a solid wall
+      // edge), reseed it at the inlet. Without this, particles pile up
+      // at the cube face and the visible streamline count slowly drops.
+      // Also add small random jitter so reseeded particles don't merge
+      // into identical trails (a single degenerate stream looked like
+      // "only 4 streamlines").
+      const moved = Math.hypot(p.position.x - prev.x, p.position.y - prev.y, p.position.z - prev.z);
       const px = p.position.x + cx, py = p.position.y + cy, pz = p.position.z + cz;
-      if (px < 0 || px >= nx || py < 0 || py >= ny || pz < 0 || pz >= nz) {
+      const outOfBounds = px < 0 || px >= nx || py < 0 || py >= ny || pz < 0 || pz >= nz;
+      if (outOfBounds || moved < 0.01) {
         const nyLim = ny * 0.4, nzLim = nz * 0.4;
-        const nyC = Math.max(-nyLim, Math.min(nyLim, py - cy));
-        const nzC = Math.max(-nzLim, Math.min(nzLim, pz - cz));
-        p.position = { x: 1.0 - cx, y: nyC, z: nzC };
+        const jitY = (this._rand() - 0.5) * nyLim * 0.8;
+        const jitZ = (this._rand() - 0.5) * nzLim * 0.8;
+        const nyC = Math.max(-nyLim, Math.min(nyLim, p.position.y + jitY));
+        const nzC = Math.max(-nzLim, Math.min(nzLim, p.position.z + jitZ));
+        p.position = { x: 1.5 - cx, y: nyC, z: nzC };
         this.trails[idx].length = 0;
       }
     }
@@ -746,14 +764,43 @@ class StreamlineTracer {
 function sampleVelocity(solver, world) {
   const { nx, ny, nz } = solver.config;
   const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
-  const gx = Math.max(0, Math.min(nx - 1.001, world.x + cx));
-  const gy = Math.max(0, Math.min(ny - 1.001, world.y + cy));
-  const gz = Math.max(0, Math.min(nz - 1.001, world.z + cz));
-  const x0 = Math.floor(gx), y0 = Math.floor(gy), z0 = Math.floor(gz);
-  const x1 = Math.min(x0 + 1, nx - 1);
-  const y1 = Math.min(y0 + 1, ny - 1);
-  const z1 = Math.min(z0 + 1, nz - 1);
-  const tx = gx - x0, ty = gy - y0, tz = gz - z0;
+  // r18: if the sample point lands in a solid cell (cube interior),
+  // project to the nearest non-solid cell so the particle slides ALONG
+  // the obstacle surface instead of stalling. The 6-direction scan
+  // converges in <3 steps for a convex obstacle.
+  let gx = Math.max(0.5, Math.min(nx - 1.5, world.x + cx));
+  let gy = Math.max(0.5, Math.min(ny - 1.5, world.y + cy));
+  let gz = Math.max(0.5, Math.min(nz - 1.5, world.z + cz));
+  let xi = Math.floor(gx), yi = Math.floor(gy), zi = Math.floor(gz);
+  if (solver.solid[solver.grid.lin(xi, yi, zi)]) {
+    // Find nearest non-solid cell by walking in all 6 directions.
+    let best = -1, bestD2 = Infinity;
+    for (let r = 1; r <= 4; r++) {
+      for (const [dx, dy, dz] of [[r,0,0],[-r,0,0],[0,r,0],[0,-r,0],[0,0,r],[0,0,-r]]) {
+        const xx = xi + dx, yy = yi + dy, zz = zi + dz;
+        if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
+        if (solver.solid[solver.grid.lin(xx, yy, zz)]) continue;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < bestD2) { bestD2 = d2; best = [xx, yy, zz]; }
+      }
+      if (best !== -1) break;
+    }
+    if (best !== -1) {
+      // Pull sample point toward the surface cell center so the velocity
+      // we read is the fluid just outside the obstacle.
+      gx = best[0] + 0.5;
+      gy = best[1] + 0.5;
+      gz = best[2] + 0.5;
+      xi = best[0]; yi = best[1]; zi = best[2];
+    }
+  }
+  const x0 = Math.min(xi, nx - 2);
+  const y0 = Math.min(yi, ny - 2);
+  const z0 = Math.min(zi, nz - 2);
+  const x1 = x0 + 1;
+  const y1 = y0 + 1;
+  const z1 = z0 + 1;
+  const tx = gx - x0 - 0.5, ty = gy - y0 - 0.5, tz = gz - z0 - 0.5;
   function fetch(x, y, z) {
     const i = solver.grid.lin(x, y, z);
     if (solver.solid[i]) return { x: 0, y: 0, z: 0 };
