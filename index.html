@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r33-2026-07-23 (wind speed display units km/h / mph / lattice toggle + live Cd-vs-wind-speed plot)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r34-2026-07-23 (wind speed label stays in selected unit after slider release — was reverting to lattice from applyConfig)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -3431,7 +3431,12 @@ async function main() {
       viscosity: parseFloat(viscInput.value),
       obstacles: buildObstacle(),
     };
-    uInfVal.textContent = config.u_inf.toFixed(3);
+    // r33: applyConfig runs on slider `change` (release) and was
+    // writing the lattice value to uInfVal. Now goes through
+    // formatUInf so the label stays consistent with the unit toggle.
+    // formatUInf + UINF_UNIT are declared just below, BEFORE the
+    // initial applyConfig() call, so this reference is always safe.
+    uInfVal.textContent = formatUInf(config.u_inf);
     viscVal.textContent = config.viscosity.toFixed(3);
     spfVal.textContent = simStepsPerFrame;
     backend.reset(config);
@@ -3490,9 +3495,6 @@ async function main() {
       }
     }
   }
-  applyConfig();
-
-  // UI handlers.
   // r33: wind speed display unit toggle (lattice | km/h | mph). The
   // slider still stores 0.02..0.20 in lattice units (the LBM-native
   // value used everywhere internally). The toggle only changes the
@@ -3502,6 +3504,8 @@ async function main() {
   // Both are display conventions — LBM has no intrinsic SI mapping
   // because it nondimensionalizes everything. Picked so the default
   // (lattice=0.08) reads as ~40 km/h, a believable low-speed tunnel.
+  // Declared here (BEFORE the initial applyConfig() call below) so the
+  // applyConfig() body can call formatUInf without hitting TDZ.
   const UINF_UNIT = {
     lattice: { label: 'lattice', factor: 1, decimals: 3, suffix: '' },
     kmh:     { label: 'km/h',    factor: 500, decimals: 0, suffix: ' km/h' },
@@ -3513,6 +3517,9 @@ async function main() {
     const v = latticeValue * u.factor;
     return v.toFixed(u.decimals) + u.suffix;
   }
+  applyConfig();
+
+  // UI handlers.
   // The existing input listener (below) is the one that updates the
   // label whenever the slider moves. Override its body by directly
   // setting textContent after the fact — both listeners fire and the
