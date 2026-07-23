@@ -169,6 +169,34 @@
       align-items: center;
       gap: 2px;
     }
+    /* r25: segmented control for trail-mode (burst | permanent).
+       Two-button toggle styled like a compact pill selector. */
+    .seg {
+      display: flex;
+      gap: 0;
+      background: var(--panel-2);
+      border-radius: 4px;
+      padding: 2px;
+      border: 1px solid var(--border);
+    }
+    .seg-btn {
+      flex: 1;
+      padding: 5px 10px;
+      background: transparent;
+      color: var(--muted);
+      border: 0;
+      border-radius: 3px;
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .seg-btn:hover { color: var(--text); }
+    .seg-btn.active {
+      background: var(--accent);
+      color: var(--bg);
+      font-weight: 600;
+    }
     input[type="range"] {
       width: 100%;
       accent-color: var(--accent);
@@ -270,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r24-2026-07-23 (UI: tooltip now escapes body overflow:hidden)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r25-2026-07-23 (streamlines: trail mode = burst | permanent)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -291,6 +319,13 @@
       <div class="control">
         <label><span class="lbl-text">streamlines <span class="help" data-tip="How many streamlines to draw. Each streamline is a trail of dots showing the path one parcel of air follows through the tunnel. More streamlines = denser flow visualization but slower FPS. The color of each trail point encodes its speed (cyan=fast, red=slow/high drag).">?</span></span><span id="streamline-count-val">80</span></label>
         <input type="range" id="streamline-count" min="10" max="400" step="10" value="80">
+      </div>
+      <div class="control trail-mode-control">
+        <label><span class="lbl-text">trail mode <span class="help" data-tip="Burst (default): trails show only the recent 96 points and disappear when the particle exits the tunnel. Permanent: every completed inlet→outlet path stays visible as a frozen line, so you can see where the wind FINISHED. Capped at 200 frozen trails (oldest are removed first).">?</span></span><span id="trail-mode-val">burst</span></label>
+        <div class="seg">
+          <button type="button" class="seg-btn active" data-mode="burst">burst</button>
+          <button type="button" class="seg-btn" data-mode="permanent">permanent</button>
+        </div>
       </div>
       <div class="control">
         <label><span class="lbl-text">sim steps/frame <span class="help" data-tip="How many simulation time-steps to run per rendered frame. 0 = paused (visual only), 1 = realtime speed, higher = fast-forward. Higher values make the simulation converge faster but use more CPU per frame.">?</span></span><span id="spf-val">1</span></label>
@@ -756,13 +791,22 @@ function computeDrag(solver, obstacleIdx) {
    ===================================================================== */
 
 class StreamlineTracer {
-  constructor(particleCount, trailLength) {
+  constructor(particleCount, trailLength, opts = {}) {
     this.particles = [];
     for (let i = 0; i < particleCount; i++) {
       this.particles.push({ position: { x: 0, y: 0, z: 0 } });
     }
     this.trailLength = trailLength;
     this.trails = Array.from({ length: particleCount }, () => []);
+    // r25: permanent trails — completed inlet→outlet paths that stay
+    // visible after the particle reseeds. In 'burst' mode (default),
+    // frozenTrails is unused. In 'permanent' mode, every time a
+    // particle exits or is reseeded, its active trail is moved into
+    // frozenTrails (so the user can see where the wind 'finished'),
+    // capped at FROZEN_CAP to keep line-count bounded.
+    this.permanent = !!opts.permanent;
+    this.frozenTrails = [];
+    this.FROZEN_CAP = 200;
     // r18: deterministic PRNG so reseeded particles jitter apart (and
     // self-test runs are reproducible).
     this._randState = (0xABCDE ^ (particleCount * 2654435761)) >>> 0;
@@ -778,6 +822,7 @@ class StreamlineTracer {
     // r18: use the tracer's PRNG (set in constructor) so successive
     // reseeds produce different jitter patterns and streamlines don't
     // merge onto identical paths after stuck-recovery reseeds.
+    // r25: also clear frozenTrails so a reset wipes everything.
     const n = this.particles.length;
     const cols = Math.ceil(Math.sqrt(n * (nx / ny)));
     const rows = Math.ceil(n / cols);
@@ -798,6 +843,7 @@ class StreamlineTracer {
     }
     // If we somehow didn't fill, just clear and start over.
     for (const t of this.trails) t.length = 0;
+    if (this.permanent) this.frozenTrails.length = 0;
   }
 
   step(solver, dt) {
@@ -818,8 +864,13 @@ class StreamlineTracer {
         y: p.position.y + dt * k2.y,
         z: p.position.z + dt * k2.z,
       };
-      this.trails[idx].push({ x: p.position.x, y: p.position.y, z: p.position.z });
-      if (this.trails[idx].length > this.trailLength) this.trails[idx].shift();
+      const trail = this.trails[idx];
+      // r25: in permanent mode, never cap trail length — each
+      // streamline grows into a full inlet→outlet path. The shift()
+      // still happens in burst mode so the rolling window keeps the
+      // moving 'tail' visible.
+      if (!this.permanent && trail.length > this.trailLength) trail.shift();
+      trail.push({ x: p.position.x, y: p.position.y, z: p.position.z });
 
       // r18: stuck-particle recovery. If a particle moves <0.01 units
       // (essentially zero velocity from being trapped at a solid wall
@@ -841,9 +892,19 @@ class StreamlineTracer {
         const jitY = (this._rand() - 0.5) * nyLim * 1.4;
         const jitZ = (this._rand() - 0.5) * nzLim * 1.4;
         const nyC = Math.max(-nyLim, Math.min(nyLim, p.position.y + jitY));
-        const nzC = Math.max(-nzLim, Math.min(nzLim, p.position.z + jitZ));
+        const nzC = Math.max(-nyLim, Math.min(nyLim, p.position.z + jitZ));
+        // r25: in permanent mode, FREEZE the current trail before
+        // clearing so the user can see the full inlet→outlet path
+        // the particle just traced. Capped at FROZEN_CAP; oldest are
+        // evicted first.
+        if (this.permanent && trail.length >= 2) {
+          this.frozenTrails.push(trail.slice());  // copy, not reference
+          if (this.frozenTrails.length > this.FROZEN_CAP) {
+            this.frozenTrails.shift();
+          }
+        }
         p.position = { x: 1.5 - cx, y: nyC, z: nzC };
-        this.trails[idx].length = 0;
+        trail.length = 0;
       }
     }
   }
@@ -1881,14 +1942,17 @@ function buildStreamlineLines(tracer, solver) {
   // (x, y, z, r, g, b). Line segments interpolate colors smoothly
   // between trail points so a particle that decelerates near the cube
   // visually transitions from cyan (free stream) to red (stalled).
+  // r25: in permanent mode, also render the frozen trails (completed
+  // inlet→outlet paths) so the user can see where the wind finished.
+  // Frozen trails use the same speed-based colormap as live ones.
   const pts = [];
   const uInf = solver.config.u_inf;
   const sampleSpeed = (world) => {
     const v = sampleVelocity(solver, world);
     return Math.hypot(v.x, v.y, v.z);
   };
-  for (const trail of tracer.trails) {
-    if (trail.length < 2) continue;
+  const emitTrail = (trail) => {
+    if (trail.length < 2) return;
     for (let i = 0; i < trail.length - 1; i++) {
       const a = trail[i], b = trail[i + 1];
       const sa = sampleSpeed(a);
@@ -1900,6 +1964,10 @@ function buildStreamlineLines(tracer, solver) {
         b.x, b.y, b.z, cb[0], cb[1], cb[2],
       );
     }
+  };
+  for (const trail of tracer.trails) emitTrail(trail);
+  if (tracer.permanent) {
+    for (const trail of tracer.frozenTrails) emitTrail(trail);
   }
   return new Float32Array(pts);
 }
@@ -2653,6 +2721,27 @@ async function main() {
   const spfVal = document.getElementById('spf-val');
   const streamCountSlider = document.getElementById('streamline-count');
   const streamCountVal = document.getElementById('streamline-count-val');
+  // r25: trail-mode segmented control (burst | permanent). Implemented
+  // as two buttons but exposed to the rest of the code via a tiny
+  // {value} facade so we can read/write it like a <select>.
+  const trailModeButtons = document.querySelectorAll('.trail-mode-control .seg-btn');
+  const trailModeVal = document.getElementById('trail-mode-val');
+  const trailModeSelect = {
+    get value() {
+      const active = document.querySelector('.trail-mode-control .seg-btn.active');
+      return active ? active.getAttribute('data-mode') : 'burst';
+    }
+  };
+  trailModeButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      trailModeButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      trailModeVal.textContent = btn.getAttribute('data-mode');
+      // Recreate the tracer with the new mode (will be wired up below
+      // once setStreamlineCount is defined).
+      setStreamlineCount(parseInt(streamCountSlider.value, 10));
+    });
+  });
   const opacitySlider = document.getElementById('opacity-slider');
   const opacityVal = document.getElementById('opacity-val');
   const playBtn = document.getElementById('play');
@@ -2763,18 +2852,25 @@ async function main() {
   let lastStatsT = performance.now();
   let dragTimer = 0;
 
-  // Streamline tracer — initial 80 streamlines, each carrying a 48-point
-  // trail. Trails are drawn as line segments in the scene. The user can
+  // Streamline tracer — initial 80 streamlines, each carrying a 96-point
+  // trail (in burst mode) or a full inlet→outlet path (in permanent
+  // mode). Trails are drawn as line segments in the scene. The user can
   // change the count live via the "streamlines" slider (10..400); on
   // change we recreate the tracer with the new size and reseed.
-  let tracer = new StreamlineTracer(80, 96);
+  // r25: 'mode' is read from the trail-mode slider on each construction.
+  let tracer = makeTracer();
+  function makeTracer() {
+    const n = parseInt(streamCountSlider.value, 10) || 80;
+    const permanent = trailModeSelect.value === 'permanent';
+    return new StreamlineTracer(n, 96, { permanent });
+  }
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
   window.__windsurfTracer = tracer;
 
   function setStreamlineCount(n) {
     n = Math.max(10, Math.min(400, n | 0));
-    if (n === tracer.particles.length) return;
-    tracer = new StreamlineTracer(n, 96);
+    if (n === tracer.particles.length && tracer.permanent === (trailModeSelect.value === 'permanent')) return;
+    tracer = new StreamlineTracer(n, 96, { permanent: trailModeSelect.value === 'permanent' });
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     window.__windsurfTracer = tracer;
   }
