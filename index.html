@@ -191,7 +191,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r14-2026-07-23 (streamlines slider 10..400 live)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r15-2026-07-23 (cube -x face: magenta→amber, debug magenta→gray)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -1349,8 +1349,11 @@ void main() {
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
   }
-  // DEBUG r7-alt: u_debugMode 0 = normal, 1 = solid magenta, 2 = red where hit.
-  if (u_debugMode == 1) { outColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
+  // DEBUG r7-alt: u_debugMode 0 = normal, 2 = red where hit. (debugMode 1
+  // used to render solid magenta but that got confused with the cube's
+  // -x face in normal scenes; the diagnostic it provided — "is the
+  // shader drawing anything?" — is now covered by debugMode 2.)
+  if (u_debugMode == 1) { outColor = vec4(0.5, 0.5, 0.5, 1.0); return; }
   if (u_debugMode == 2) {
     if (accumAlpha > 0.01) outColor = vec4(1.0, 0.2, 0.2, 1.0);
     else                   outColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -2483,11 +2486,11 @@ async function main() {
   // +z cyan, -z orange. The cube reads as a real 3D object immediately.
   const CUBE_FACE_COLORS = [
     [0.35, 0.85, 0.45],  // +x (right, windward face): green
-    [0.95, 0.40, 0.75],  // -x (left, leeward face): magenta
+    [0.85, 0.55, 0.20],  // -x (left, leeward face): amber (was magenta; confusing as 'debug' on some camera angles)
     [1.00, 0.95, 0.40],  // +y (top): yellow
     [0.30, 0.45, 0.85],  // -y (bottom): blue
-    [0.45, 0.85, 1.00],  // +z (front): cyan
-    [1.00, 0.60, 0.20],  // -z (back): orange
+    [0.40, 0.75, 0.95],  // +z (front): cyan
+    [0.95, 0.55, 0.25],  // -z (back): orange
   ];
   // Fixed light direction (world space): from above-right-front.
   const LIGHT_DIR = [0.5, 0.8, 0.3];
