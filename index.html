@@ -1106,9 +1106,7 @@ class LbmSolver {
     const oscPhase = (oscF > 0)
       ? (2 * Math.PI * oscF * this.stepCount)
       : 0;
-    if (window.__windsurfDebug && this.stepCount < 5 || this.stepCount === 50 || this.stepCount === 100) {
-      console.log(`[r41] step=${this.stepCount} phase=${oscPhase.toFixed(3)} sin=${Math.sin(oscPhase).toFixed(3)} ax=${oscAx} ay=${oscAy} az=${oscAz} f=${oscF}`);
-    }
+    // (debug log removed for r41 ship — see r41 commit history)
     // Wavelength = full domain extent in z (so one complete cycle fits
     // across the inlet plane). Cross-stream modulation is what builds
     // up into a Karman vortex street; this is the cleanest setup.
@@ -1133,6 +1131,34 @@ class LbmSolver {
         // r38: inject smoke at the inlet. Setting to 1 every step (not
         // every applyConfig) keeps the source continuous as the sim runs.
         this.grid.smoke[i] = 1;
+      }
+    }
+    // r41: also update grid.u and grid.rho at x=0 to match the
+    // equilibrium f we just set. Without this, computeMacroscopic at
+    // the START of the next step would read post-streaming f (which
+    // pulls x=0's f from neighbors, NOT from our freshly-set
+    // equilibrium). That stale value would persist in grid.u and
+    // smear into the smoke/strain kernels for ONE step, until
+    // streaming overwrites x=0 again next round.
+    // The fix: directly compute moments for x=0 cells from the f we
+    // just wrote. Cheap (one cell × 19 dirs × ~5 ops = 95 ops).
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        const i = this.grid.lin(0, y, z);
+        if (this.solid[i]) continue;
+        let rho = 0, mx = 0, my = 0, mz = 0;
+        for (let q = 0; q < Q; q++) {
+          const fq = this.grid.f[i * Q + q];
+          rho += fq;
+          mx += D3Q19[q][0] * fq;
+          my += D3Q19[q][1] * fq;
+          mz += D3Q19[q][2] * fq;
+        }
+        this.grid.rho[i] = rho;
+        const inv = rho > 1e-12 ? 1 / rho : 0;
+        this.grid.u[i * 3 + 0] = mx * inv;
+        this.grid.u[i * 3 + 1] = my * inv;
+        this.grid.u[i * 3 + 2] = mz * inv;
       }
     }
     // Outlet (x=nx-1): copy from x=nx-2
