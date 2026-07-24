@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r36-2026-07-23 (sim-unstable warning threshold raised 75→200 km/h — empirical sweep showed sim stays stable to ~u=0.40 lattice)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r37-2026-07-23 (trail-mode toggle no longer resets tracer — back-fills frozenTrails on burst→permanent for instant 'full tunnel' view, seamless switch)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -340,7 +340,7 @@
         <input type="range" id="streamline-count" min="10" max="400" step="10" value="80">
       </div>
       <div class="control trail-mode-control">
-        <label><span class="lbl-text">trail mode <span class="help" data-tip="Burst (default): trails show only the recent 96 points and disappear when the particle exits the tunnel. Permanent: every completed inlet→outlet path stays visible as a frozen line, so you can see where the wind FINISHED. Capped at 200 frozen trails (oldest are removed first).">?</span></span><span id="trail-mode-val">burst</span></label>
+        <label><span class="lbl-text">trail mode <span class="help" data-tip="Burst (default): trails show only the recent 96 points and disappear when the particle exits the tunnel. Permanent: every completed inlet→outlet path stays visible as a frozen line, so you can see where the wind FINISHED. Capped at 200 frozen trails (oldest are removed first). Toggling between modes is seamless in r37 — the active trails are kept live and (on burst→permanent) snapped into frozenTrails so the tunnel looks full the moment you click, not 5 seconds later.">?</span></span><span id="trail-mode-val">burst</span></label>
         <div class="seg">
           <button type="button" class="seg-btn active" data-mode="burst">burst</button>
           <button type="button" class="seg-btn" data-mode="permanent">permanent</button>
@@ -3225,9 +3225,10 @@ async function main() {
       trailModeButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       trailModeVal.textContent = btn.getAttribute('data-mode');
-      // Recreate the tracer with the new mode (will be wired up below
-      // once setStreamlineCount is defined).
-      setStreamlineCount(parseInt(streamCountSlider.value, 10));
+      // r37: hand off to setTrailMode which toggles without recreating
+      // (and back-fills frozen trails on the burst→permanent transition
+      // so the tunnel looks full immediately, no 5s fill-in lag).
+      setTrailMode(btn.getAttribute('data-mode'));
     });
   });
   const opacitySlider = document.getElementById('opacity-slider');
@@ -3362,8 +3363,15 @@ async function main() {
   // trail (in burst mode) or a full inlet→outlet path (in permanent
   // mode). Trails are drawn as line segments in the scene. The user can
   // change the count live via the "streamlines" slider (10..400); on
-  // change we recreate the tracer with the new size and reseed.
+  // count change we recreate the tracer with the new size and reseed.
   // r25: 'mode' is read from the trail-mode slider on each construction.
+  // r37: trail-mode change no longer recreates the tracer — it just
+  // toggles the permanent flag and (on the burst→permanent transition)
+  // back-fills frozenTrails with the existing active trails so the
+  // tunnel looks full IMMEDIATELY instead of waiting 5s for particles
+  // to traverse it. Without this back-fill, switching to permanent
+  // looks like a "blast" from the inlet — the user perceives a 'wave'
+  // of streamlines moving across the tunnel every toggle.
   let tracer = makeTracer();
   function makeTracer() {
     const n = parseInt(streamCountSlider.value, 10) || 80;
@@ -3379,6 +3387,34 @@ async function main() {
     tracer = new StreamlineTracer(n, 96, { permanent: trailModeSelect.value === 'permanent' });
     tracer.seedInlet(spec.nx, spec.ny, spec.nz);
     window.__windsurfTracer = tracer;
+  }
+
+  // r37: switch trail mode without recreating the tracer. Keeps all
+  // active trails live (they keep advecting), and on burst→permanent
+  // we snapshot the current active trails into frozenTrails so the
+  // tunnel already looks full — no more 5-second "fill-in" lag.
+  function setTrailMode(mode) {
+    const wantPermanent = mode === 'permanent';
+    if (wantPermanent === tracer.permanent) return;
+    if (wantPermanent) {
+      // Back-fill: snapshot whatever active trails we already have into
+      // frozenTrails so the user sees a full tunnel immediately. Trails
+      // shorter than 2 points are skipped (nothing to draw). Capped by
+      // FROZEN_CAP; oldest are evicted first as new ones arrive.
+      for (const trail of tracer.trails) {
+        if (trail.length >= 2) {
+          tracer.frozenTrails.push(trail.slice());
+        }
+      }
+      while (tracer.frozenTrails.length > tracer.FROZEN_CAP) {
+        tracer.frozenTrails.shift();
+      }
+    } else {
+      // Switching back to burst: clear frozen trails so the user sees
+      // only the recent 96-point tails, matching the burst aesthetic.
+      tracer.frozenTrails.length = 0;
+    }
+    tracer.permanent = wantPermanent;
   }
 
   // Reset / state.
