@@ -1106,6 +1106,9 @@ class LbmSolver {
     const oscPhase = (oscF > 0)
       ? (2 * Math.PI * oscF * this.stepCount)
       : 0;
+    if (window.__windsurfDebug && this.stepCount % 50 === 0) {
+      console.log(`[r41] step=${this.stepCount} phase=${oscPhase.toFixed(3)} sin=${Math.sin(oscPhase).toFixed(3)} ax=${oscAx} ay=${oscAy} az=${oscAz} f=${oscF}`);
+    }
     // Wavelength = full domain extent in z (so one complete cycle fits
     // across the inlet plane). Cross-stream modulation is what builds
     // up into a Karman vortex street; this is the cleanest setup.
