@@ -4755,6 +4755,10 @@ function drawSlicePlane(ctx, canvas, backend, fieldMode) {
   //    to ~7-8 pixels per side — coarse but readable.
   //    Field value normalisation matches the volumetric shader's
   //    mapping so the colours are consistent with the 3D view.
+  //    For density (mode 0), the volumetric applies max(val-1, 0)
+  //    so the bulk (val=1) shows as d=0; we apply the same offset
+  //    here so the slice shows pressure buildup (val>1) brightly
+  //    and the bulk as the colormap minimum.
   let vMin = Infinity, vMax = -Infinity;
   // First pass: find the range for normalisation.
   if (isSigned) {
@@ -4769,10 +4773,13 @@ function drawSlicePlane(ctx, canvas, backend, fieldMode) {
     if (vMax < 1e-6) vMax = 1e-6;
   } else {
     // For density/velocity/vorticity, use the max so the brightest
-    // pixel is at the top of the colormap.
+    // pixel is at the top of the colormap. For density, subtract 1
+    // so the bulk (val=1) sits at the bottom of the colormap and
+    // only pressure buildup (val>1) shows bright.
     for (let z = 0; z < nz; z++) {
       for (let x = 0; x < nx; x++) {
-        const v = field[lin(x, ySlice, z)];
+        let v = field[lin(x, ySlice, z)];
+        if (fieldMode === 0) v = Math.max(v - 1, 0);
         if (v > vMax) vMax = v;
         if (v < vMin) vMin = v;
       }
@@ -4784,7 +4791,8 @@ function drawSlicePlane(ctx, canvas, backend, fieldMode) {
     for (let x = 0; x < nx; x++) {
       const i = lin(x, ySlice, z);
       if (solver.solid[i]) continue; // skip the obstacle (drawn later)
-      const v = field[i];
+      let v = field[i];
+      if (fieldMode === 0) v = Math.max(v - 1, 0);
       const px = margin + (x / nx) * drawW;
       const py = margin + (z / nz) * drawH;
       const cellW = drawW / nx;
