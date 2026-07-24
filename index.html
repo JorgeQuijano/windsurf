@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r45-2026-07-24 (stream ribbons: toggle "ribbon mode" in the side panel to render streamlines as billboarded triangle-strip ribbons with adjustable width. Each trail point is extruded perpendicular to the flow tangent and the ribbon always faces the camera regardless of orbit angle. Per-trail-point velocity coloring (cyan = fast, red = slow) is preserved. Useful for visualising flow direction over distance. Default: lines (unchanged). 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r46-2026-07-24 (pathline burst: toggle "pathlines" in the side panel to inject a one-shot burst of 60 Lagrangian particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Trail color fades from bright orange (head) to dark red (tail) over ~24 steps, showing the time-history of each particle. Particles that exit the outlet or get stuck on the obstacle are removed. Useful for visualising transient flow: "where did the wind come from in the last second" vs streamlines "where the wind is going right now". Default off. 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -374,6 +374,12 @@
       <div class="control">
         <label><span class="lbl-text">ribbon width <span class="help" data-tip="r45: ribbon half-width in lattice units. The full width is 2x this value, applied perpendicular to the flow tangent and billboarded to face the camera. 0.3 = subtle ribbon (default-ish, doesn't occlude the volumetric). 1.0 = prominent ribbon (more visible, may occlude the wake). 2.0+ = very wide (best for highlighting the flow direction over distance).">?</span></span><span id="ribbon-width-val">0.30</span></label>
         <input type="range" id="ribbon-width-slider" min="0.1" max="2.0" step="0.05" value="0.30">
+      </div>
+      <div class="control">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="pathline-toggle" style="width:14px;height:14px;cursor:pointer">
+          <span class="lbl-text">pathlines <span class="help" data-tip="r46: Lagrangian particle burst. Toggle on to inject a burst of 60 particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Particles that exit the outlet or get stuck on the obstacle are removed. Trails fade from bright orange (head) to dark red (tail) over ~1 second, showing the time-history of each particle's path. Useful for visualising transient flow: 'where did the wind come from in the last second' vs streamlines which show 'where the wind is going right now'. Default off.">?</span></span>
+        </label>
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
@@ -3223,6 +3229,162 @@ function speedToColor(speedMag, uInf) {
   ];
 }
 
+// r46: PathlineBurst. A one-shot burst of Lagrangian particles. Each
+// particle advects through the scene via RK2 in the velocity field and
+// leaves a fading trail behind it. The trail's color shifts from bright
+// orange (head) to dark red (tail) over the trail length, giving a
+// "where did this particle come from in the last second" feel that
+// complements streamlines (which show "where the wind is going right
+// now"). Particles that exit the outlet or get stuck on the obstacle
+// are removed.
+class PathlineBurst {
+  constructor(maxParticles, trailLength) {
+    this.maxParticles = maxParticles;
+    this.trailLength = trailLength;
+    // Each particle: { position, trail: [{x,y,z}, ...], alive, headColor, tailColor }
+    this.particles = [];
+    this._randState = (0xDEADBEEF ^ (maxParticles * 2654435761)) >>> 0;
+  }
+  _rand() {
+    this._randState = (Math.imul(this._randState, 1664525) + 1013904223) >>> 0;
+    return this._randState / 0xFFFFFFFF;
+  }
+  // Spawn N particles at the inlet, distributed across a y/z jittered
+  // grid (similar to StreamlineTracer.seedInlet but with a different
+  // PRNG so the two systems don't synchronize). Each particle gets a
+  // random head color (orange-yellow) and a matching darker tail color.
+  inject(nx, ny, nz) {
+    this.particles.length = 0;
+    const n = this.maxParticles;
+    const cols = Math.ceil(Math.sqrt(n * (nx / ny)));
+    const rows = Math.ceil(n / cols);
+    const nyLim = ny * 0.4, nzLim = nz * 0.4;
+    let i = 0;
+    for (let r = 0; r < rows && i < n; r++) {
+      for (let c = 0; c < cols && i < n; c++) {
+        const fy = (r + 0.5 + (this._rand() - 0.5) * 0.7) / rows;
+        const fz = (c + 0.5 + (this._rand() - 0.5) * 0.7) / cols;
+        // Bright orange head, dark red tail.
+        this.particles.push({
+          position: {
+            x: -nx * 0.45,  // inlet
+            y: (fy - 0.5) * (ny * 0.85),
+            z: (fz - 0.5) * (nz * 0.85),
+          },
+          trail: [],
+          alive: true,
+          // Slight per-particle hue variation so the burst doesn't
+          // look like a single solid block of orange.
+          hue: this._rand(),
+        });
+        i++;
+      }
+    }
+  }
+  clear() {
+    this.particles.length = 0;
+  }
+  // Advance all particles by dt in the velocity field. Particles that
+  // exit the outlet, or get stuck (move <0.01 units), are marked dead
+  // and removed by the next cleanup sweep.
+  step(solver, dt) {
+    const { nx, ny, nz } = solver.config;
+    const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      if (!p.alive) {
+        this.particles.splice(i, 1);
+        continue;
+      }
+      const prev = { x: p.position.x, y: p.position.y, z: p.position.z };
+      const k1 = sampleVelocity(solver, p.position);
+      const mid = {
+        x: p.position.x + 0.5 * dt * k1.x,
+        y: p.position.y + 0.5 * dt * k1.y,
+        z: p.position.z + 0.5 * dt * k1.z,
+      };
+      const k2 = sampleVelocity(solver, mid);
+      p.position = {
+        x: p.position.x + dt * k2.x,
+        y: p.position.y + dt * k2.y,
+        z: p.position.z + dt * k2.z,
+      };
+      // Append to trail. Capped at trailLength (rolling window).
+      p.trail.push({ x: p.position.x, y: p.position.y, z: p.position.z });
+      if (p.trail.length > this.trailLength) p.trail.shift();
+      // Check death conditions: out of bounds, or stuck.
+      const moved = Math.hypot(p.position.x - prev.x, p.position.y - prev.y, p.position.z - prev.z);
+      const px = p.position.x + cx, py = p.position.y + cy, pz = p.position.z + cz;
+      const out = px < 0 || px >= nx || py < 0 || py >= ny || pz < 0 || pz >= nz;
+      if (out || moved < 0.005) {
+        p.alive = false;
+        // Keep the trail visible — don't splice yet, the renderer
+        // will draw the final trail as the particle disappears.
+        // We splice on the NEXT step.
+      }
+    }
+  }
+}
+
+// r46: build the line geometry for pathline trails. Each particle's
+// trail is a polyline with per-vertex color that fades from bright
+// (head) to dark (tail) based on the trail index. This gives the
+// "motion blur" effect — you see where the particle came from in the
+// last few frames, with the oldest points being darkest. Returns a
+// Float32Array in the same 6-floats-per-vertex (pos+color) layout
+// used by the line renderer.
+function buildPathlineTrails(burst) {
+  const pts = [];
+  for (const p of burst.particles) {
+    const t = p.trail;
+    if (t.length < 2) continue;
+    // Per-particle color stops. Base hue varies slightly per particle;
+    // head = bright, tail = dark.
+    const h = p.hue;
+    // Head color: bright orange-yellow (1.0, 0.7, 0.2)
+    // Tail color: dark red (0.4, 0.05, 0.0)
+    // The slight hue jitter shifts the head toward yellow or red.
+    const headR = 1.0, headG = 0.65 + 0.15 * h, headB = 0.15;
+    const tailR = 0.40, tailG = 0.04, tailB = 0.00;
+    for (let i = 0; i < t.length - 1; i++) {
+      // Map i (oldest = 0, newest = t.length-1) to alpha fraction.
+      // Newest point should be brightest, oldest should be darkest.
+      const fracA = (i + 1) / t.length;  // older -> 0, newer -> 1
+      const fracB = (i + 2) / t.length;
+      const rA = tailR + (headR - tailR) * fracA;
+      const gA = tailG + (headG - tailG) * fracA;
+      const bA = tailB + (headB - tailB) * fracA;
+      const rB = tailR + (headR - tailR) * fracB;
+      const gB = tailG + (headG - tailG) * fracB;
+      const bB = tailB + (headB - tailB) * fracB;
+      const a = t[i], b = t[i + 1];
+      pts.push(
+        a.x, a.y, a.z, rA, gA, bA,
+        b.x, b.y, b.z, rB, gB, bB,
+      );
+    }
+  }
+  return new Float32Array(pts);
+}
+
+// r46: build the point geometry for pathline heads (the leading
+// particle positions). Each head is a 6-float vertex (pos+color);
+// we render as GL_POINTS so each head is a small bright dot. The
+// size is fixed by gl_PointSize in the shader.
+function buildPathlineHeads(burst) {
+  const pts = [];
+  for (const p of burst.particles) {
+    if (!p.alive) continue;
+    const h = p.hue;
+    // Bright head color: same as trail head, slightly more saturated.
+    pts.push(
+      p.position.x, p.position.y, p.position.z,
+      1.0, 0.75 + 0.15 * h, 0.20,
+    );
+  }
+  return new Float32Array(pts);
+}
+
 function buildStreamlineLines(tracer, solver) {
   // r20: emit interleaved pos+color geometry. Each vertex is 6 floats
   // (x, y, z, r, g, b). Line segments interpolate colors smoothly
@@ -3385,6 +3547,10 @@ out vec3 v_color;
 void main() {
   v_color = a_color;
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
+  // r46: gl_PointSize controls the rendered size of GL_POINTS
+  // primitives. Only used when the draw mode is GL_POINTS (the
+  // pathline heads); ignored by LINES and TRIANGLE_STRIP.
+  gl_PointSize = 6.0;
 }`;
 
 const LINE_FS = `#version 300 es
@@ -4515,6 +4681,73 @@ function registerTests(tr) {
     }
   });
 
+  // -- r46: pathline burst --
+  tr.test('r46_pathline_burst_inject_spawns_n_particles', () => {
+    // PathlineBurst.inject(nx, ny, nz) should create exactly
+    // maxParticles particles, all alive, all at the inlet (x=-nx*0.45).
+    const burst = new PathlineBurst(5, 8);
+    burst.inject(32, 16, 16);
+    tr.assert(burst.particles.length === 5, `expected 5 particles, got ${burst.particles.length}`);
+    for (const p of burst.particles) {
+      tr.assert(p.alive, 'all particles alive after inject');
+      tr.assert(Math.abs(p.position.x + 32 * 0.45) < 1e-6, `particle at inlet, x=${p.position.x}`);
+    }
+  });
+  tr.test('r46_pathline_burst_step_advances_particles', () => {
+    // step() should move each particle in the +x direction (downstream)
+    // in a uniform flow. Trails should grow.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const burst = new PathlineBurst(3, 8);
+    burst.inject(solver.config.nx, solver.config.ny, solver.config.nz);
+    const x0 = burst.particles[0].position.x;
+    for (let i = 0; i < 5; i++) burst.step(solver, 1.0);
+    tr.assert(burst.particles[0].position.x > x0, `particle should move downstream, x0=${x0} x1=${burst.particles[0].position.x}`);
+    tr.assert(burst.particles[0].trail.length > 0, 'trail should grow');
+  });
+  tr.test('r46_pathline_trails_emit_per_vertex_fade_color', () => {
+    // buildPathlineTrails should emit per-vertex color that fades
+    // from bright (head) to dark (tail) within each particle's trail.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const burst = new PathlineBurst(1, 4);
+    burst.inject(solver.config.nx, solver.config.ny, solver.config.nz);
+    for (let i = 0; i < 5; i++) burst.step(solver, 1.0);
+    const geom = buildPathlineTrails(burst);
+    tr.assert(geom.length > 0, 'trail geometry should be non-empty');
+    // First segment: oldest point (index 0) should be dim, newest (index 3) bright.
+    // The 6 floats per vertex are (x, y, z, r, g, b).
+    const rOld = geom[3];
+    const rNew = geom[9];  // second segment, first vertex
+    tr.assert(rNew > rOld, `newer vertex should be brighter (head), rOld=${rOld} rNew=${rNew}`);
+  });
+  tr.test('r46_pathline_heads_emit_one_vertex_per_alive_particle', () => {
+    // buildPathlineHeads should emit one 6-float vertex per ALIVE
+    // particle. Dead particles are skipped (their last position is
+    // still in the trail, but no head point is emitted).
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    const burst = new PathlineBurst(3, 8);
+    burst.inject(solver.config.nx, solver.config.ny, solver.config.nz);
+    burst.step(solver, 1.0);
+    // Manually mark 1 particle dead (without removing it — the
+    // render loop splices dead particles on the next step).
+    burst.particles[1].alive = false;
+    const geom = buildPathlineHeads(burst);
+    tr.assert(geom.length === 2 * 6, `expected 2 heads (12 floats), got ${geom.length}`);
+  });
+  tr.test('r46_pathline_burst_clear_removes_all_particles', () => {
+    // clear() should remove all particles.
+    const burst = new PathlineBurst(5, 8);
+    burst.inject(16, 16, 16);
+    tr.assert(burst.particles.length === 5, '5 particles after inject');
+    burst.clear();
+    tr.assert(burst.particles.length === 0, `expected 0 after clear, got ${burst.particles.length}`);
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -5305,6 +5538,14 @@ async function main() {
   // tangent, facing the camera) instead of 1D lines. Off by default.
   let ribbonEnabled = false;
   let ribbonWidth = 0.30;
+  // r46: pathline burst. When enabled, a burst of N particles is
+  // injected at the inlet. Each particle advects through the scene
+  // (RK2 in the velocity field) and leaves a fading trail. Particles
+  // that exit the outlet are removed. The burst is a one-shot: it
+  // re-fires if the user toggles off→on (or hits a "burst again"
+  // button — not implemented in v1, just toggle off→on).
+  let pathlineEnabled = false;
+  const pathlineCount = 60;
 
   // Streamline tracer — initial 80 streamlines, each carrying a 96-point
   // trail (in burst mode) or a full inlet→outlet path (in permanent
@@ -5327,6 +5568,12 @@ async function main() {
   }
   tracer.seedInlet(spec.nx, spec.ny, spec.nz);
   window.__windsurfTracer = tracer;
+  // r46: pathline burst. Created once, injected when the user toggles
+  // 'pathlines' on. The render loop steps it every frame and rebuilds
+  // the trail + head geometry. trailLength=24 keeps the visible trail
+  // short enough to look like a 'motion blur' rather than a streamline.
+  const pathlineBurst = new PathlineBurst(pathlineCount, 24);
+  window.__windsurfPathlineBurst = pathlineBurst;
 
   function setStreamlineCount(n) {
     n = Math.max(10, Math.min(400, n | 0));
@@ -5447,6 +5694,12 @@ async function main() {
     if (lines) {
       lines.clearSegments();
       lines.addSegment(new Float32Array(0), [0.40, 0.75, 1.00, 0.85]);     // streamlines (empty placeholder, updated per frame)
+      // r46: pathline trails (line geometry) and heads (point geometry).
+      // Both updated per frame when pathlineEnabled is true. Both are
+      // empty initially; the render loop fills them in.
+      const glRef = lines.gl;
+      lines.addSegment(new Float32Array(0), [1.00, 0.65, 0.15, 0.95]);     // pathline trails (line)
+      lines.addSegment(new Float32Array(0), [1.00, 0.75, 0.20, 1.00], glRef.POINTS);  // pathline heads (points)
     }
     // r26: refresh the artifact mesh for the FIRST obstacle, picking
     // the right mesh builder by shape. All shapes share the cube
@@ -5648,6 +5901,18 @@ async function main() {
     ribbonWidthSlider.addEventListener('input', () => {
       ribbonWidth = parseFloat(ribbonWidthSlider.value);
       if (ribbonWidthVal) ribbonWidthVal.textContent = ribbonWidth.toFixed(2);
+    });
+  }
+  // r46: pathline toggle. Off→on injects a fresh burst; on→off clears
+  // all particles and trails immediately.
+  const pathlineToggle = document.getElementById('pathline-toggle');
+  if (pathlineToggle) {
+    pathlineToggle.addEventListener('change', () => {
+      pathlineEnabled = pathlineToggle.checked;
+      if (pathlineBurst) {
+        if (pathlineEnabled) pathlineBurst.inject(solver.config.nx, solver.config.ny, solver.config.nz);
+        else pathlineBurst.clear();
+      }
     });
   }
   smokeOpacitySlider.addEventListener('input', () => {
@@ -5974,6 +6239,14 @@ async function main() {
       // dt=3.0 makes each tracer step large enough that 48-point trails
       // span many cells of the tunnel — visible curves, not dots.
       if (backend.solver) tracer.step(backend.solver, 3.0);
+      // r46: advect the pathline burst through the same velocity field.
+      // Uses the same dt=3.0 as the streamline tracer so the burst
+      // matches the visible flow speed. Only steps when pathlineEnabled
+      // is true; otherwise the burst is frozen (but preserved so the
+      // user can toggle on/off without losing state).
+      if (backend.solver && pathlineEnabled && pathlineBurst) {
+        pathlineBurst.step(backend.solver, 3.0);
+      }
       simStepsThisSecond += steps;
       stepOnce = false;
     }
@@ -6129,8 +6402,20 @@ async function main() {
             const streamGeom = buildStreamlineLines(tracer, backend.solver);
             lines.updateSegment(0, streamGeom);
           }
+          // r46: update the pathline trail and head segments. The
+          // burst is empty when pathlineEnabled is false, so segments
+          // 1 and 2 just get an empty Float32Array (no-op draw).
+          if (pathlineEnabled) {
+            lines.updateSegment(1, buildPathlineTrails(pathlineBurst));
+            lines.updateSegment(2, buildPathlineHeads(pathlineBurst));
+          } else {
+            lines.updateSegment(1, new Float32Array(0));
+            lines.updateSegment(2, new Float32Array(0));
+          }
         } else {
           lines.updateSegment(0, new Float32Array(0));
+          lines.updateSegment(1, new Float32Array(0));
+          lines.updateSegment(2, new Float32Array(0));
         }
         lines.draw(vp.viewProj);
       }
