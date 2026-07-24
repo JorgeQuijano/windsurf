@@ -3767,21 +3767,24 @@ function registerTests(tr) {
   });
   tr.test('oscillating_inflow_amp_y_creates_lateral_velocity', () => {
     // Enable lateral gust — u_y at the inlet should oscillate in z.
+    // Run to a step where the modulated value is non-trivial so we can
+    // verify the pattern (not just that |uy| < epsilon like r41's first
+    // attempt, which passed trivially for the wrong reason).
     const config = { nx: 8, ny: 8, nz: 16, u_inf: 0.10, rho0: 1.0, viscosity: 0.02,
       obstacles: [], oscAmpY: 0.05, oscFreq: 0.01 };
     const solver = new LbmSolver(config);
-    for (let i = 0; i < 100; i++) solver.step();
-    // At step 100, phase = 2π · 0.01 · 100 = 2π → sin(2π) = 0 so uy at z=0
-    // is sin(0) = 0 but at z=4 it's sin(0 + 2π · 4 / 16) = sin(π/2) = 1.
+    // After 25 steps: phase = 2π·0.01·25 = π/2. So uy at z=0 is
+    // 0.05·sin(π/2 + 0) = 0.05, and uy at z=4 is 0.05·sin(π/2 + π/2) = 0.
+    for (let i = 0; i < 25; i++) solver.step();
     const u_z0 = solver.grid.u[solver.grid.lin(0, 4, 0) * 3 + 1];
     const u_z4 = solver.grid.u[solver.grid.lin(0, 4, 4) * 3 + 1];
-    const u_z8 = solver.grid.u[solver.grid.lin(0, 4, 8) * 3 + 1];
-    // z=0: sin(0 + 0) = 0, scaled by 0.05 → expect ~0
-    tr.assert(Math.abs(u_z0) < 0.01, `u_z0 = ${u_z0}, expected ~0`);
-    // z=4: sin(2π) = 0 too (full cycle). Try a different step count
-    // to make sure the formula is actually being applied. After step 25,
-    // phase = 2π · 0.01 · 25 = π/2 → sin(π/2 + 0) = 1 at z=0.
-    tr.assert(true, 'oscillation reaches inlet (visual check)');
+    // z=0: expect uy ≈ +0.05 (within numerical error)
+    tr.assert(Math.abs(u_z0 - 0.05) < 0.005, `u_z0 = ${u_z0}, expected ~+0.05`);
+    // z=4: expect uy ≈ 0 (sin(π/2 + π/2) = sin(π) = 0)
+    tr.assert(Math.abs(u_z4) < 0.005, `u_z4 = ${u_z4}, expected ~0`);
+    // u_x at x=0 must remain at u_inf = 0.10 (amp_x = 0, so no modulation)
+    const ux_z0 = solver.grid.u[solver.grid.lin(0, 4, 0) * 3 + 0];
+    tr.assert(Math.abs(ux_z0 - 0.10) < 0.005, `ux_z0 = ${ux_z0}, expected ~0.10`);
   });
   tr.test('oscillating_inflow_step_doesnt_crash', () => {
     // Smoke test: oscillating inflow + obstacle must not throw.
