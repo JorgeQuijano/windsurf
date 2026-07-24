@@ -1219,6 +1219,9 @@ function computeDrag(solver, obstacleIdx) {
         const dux_dy = (isFp_y && isFn_y)
           ? (uAt(nyp, 0) - uAt(nyn, 0)) * 0.5
           : (isFp_y ? uAt(nyp, 0) : (isFn_y ? -uAt(nyn, 0) : 0));
+        const duy_dy = (isFp_y && isFn_y)
+          ? (uAt(nyp, 1) - uAt(nyn, 1)) * 0.5
+          : (isFp_y ? uAt(nyp, 1) : (isFn_y ? -uAt(nyn, 1) : 0));
         const duz_dy = (isFp_y && isFn_y)
           ? (uAt(nyp, 2) - uAt(nyn, 2)) * 0.5
           : (isFp_y ? uAt(nyp, 2) : (isFn_y ? -uAt(nyn, 2) : 0));
@@ -1230,6 +1233,9 @@ function computeDrag(solver, obstacleIdx) {
         const duy_dz = (isFp_z && isFn_z)
           ? (uAt(nzp, 1) - uAt(nzn, 1)) * 0.5
           : (isFp_z ? uAt(nzp, 1) : (isFn_z ? -uAt(nzn, 1) : 0));
+        const duz_dz = (isFp_z && isFn_z)
+          ? (uAt(nzp, 2) - uAt(nzn, 2)) * 0.5
+          : (isFp_z ? uAt(nzp, 2) : (isFn_z ? -uAt(nzn, 2) : 0));
 
         // Viscous stress tensor: σ_ab = ρ ν (∂u_a/∂x_b + ∂u_b/∂x_a)
         // We compute (∇u + ∇uᵀ) here without the ρ ν factor; the
