@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r34-2026-07-23 (wind speed label stays in selected unit after slider release — was reverting to lattice from applyConfig)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r35-2026-07-23 (wind speed 10–300 km/h with km/h/mph/knots/lattice + ⚠ sim-unstable warning above ~75 km/h)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -322,12 +322,13 @@
         </div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. The toggle below chooses display units: lattice (raw LBM value, 0.02-0.20), km/h, or mph. The km/h and mph scales are display conventions — LBM has no intrinsic SI units, so we map 0.08 lattice → 40 km/h → 25 mph (a typical low-speed wind tunnel feel).">?</span></span><span id="u-inf-val">40 km/h</span></label>
-        <input type="range" id="u-inf" min="0.02" max="0.20" step="0.005" value="0.08">
+        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. Toggle below for display units: lattice (raw LBM value), km/h, mph, knots. Mapping is a display convention — LBM has no intrinsic SI units, so we set 1 lattice unit = 500 km/h = 310 mph = 270 knots (picked so the default 0.08 lattice reads as ~40 km/h, a typical low-speed tunnel feel). Slider range 0.02..0.60 lattice = 10..300 km/h. The LBM solver is most accurate at low Mach (u < ~0.15 lattice, ~75 km/h); above that you'll see wake distortion and instabilities — that's the simulation leaving its validity envelope, not a bug.">?</span></span><span id="u-inf-val">40 km/h</span><span id="u-inf-warn" style="display:none;color:#ffaa44;font-size:10px;margin-left:6px" title="LBM becomes unstable above ~75 km/h. Cd/F_x values shown here are numerical artifacts, not physical.">⚠ sim unstable</span></label>
+        <input type="range" id="u-inf" min="0.02" max="0.60" step="0.01" value="0.08">
         <div class="seg unit-toggle" id="u-inf-unit-toggle" style="margin-top:6px">
           <button type="button" class="seg-btn" data-unit="lattice">lattice</button>
           <button type="button" class="seg-btn active" data-unit="kmh">km/h</button>
           <button type="button" class="seg-btn" data-unit="mph">mph</button>
+          <button type="button" class="seg-btn" data-unit="knots">knots</button>
         </div>
       </div>
       <div class="control">
@@ -3495,21 +3496,28 @@ async function main() {
       }
     }
   }
-  // r33: wind speed display unit toggle (lattice | km/h | mph). The
-  // slider still stores 0.02..0.20 in lattice units (the LBM-native
+  // r33: wind speed display unit toggle (lattice | km/h | mph | knots).
+  // The slider stores 0.02..0.60 in lattice units (the LBM-native
   // value used everywhere internally). The toggle only changes the
   // LABEL format and the Cd-plot x-axis. Mapping:
-  //   km/h = lattice * 500  → 0.02 → 10, 0.08 → 40, 0.20 → 100
-  //   mph  = lattice * 310  → 0.02 → 6.2, 0.08 → 24.9, 0.20 → 62
-  // Both are display conventions — LBM has no intrinsic SI mapping
-  // because it nondimensionalizes everything. Picked so the default
-  // (lattice=0.08) reads as ~40 km/h, a believable low-speed tunnel.
+  //   km/h  = lattice * 500  → 0.02 → 10, 0.08 → 40, 0.60 → 300
+  //   mph   = lattice * 310  → 0.02 → 6.2, 0.08 → 24.9, 0.60 → 186
+  //   knots = lattice * 270  → 0.02 → 5.4, 0.08 → 21.6, 0.60 → 162
+  // All three are display conventions — LBM has no intrinsic SI
+  // mapping because it nondimensionalizes everything. Picked so the
+  // default (lattice=0.08) reads as ~40 km/h, a believable low-speed
+  // tunnel, and so the slider max (0.60) maps cleanly to a memorable
+  // "300 km/h" — a highway speed, the user's stated upper bound.
+  // Conversion factors (verified): 1 km/h = 0.621371 mph = 0.539957 kt
+  //                              1 lattice * 500 km/h = 310.69 mph
+  //                              1 lattice * 500 km/h = 269.98 knots
   // Declared here (BEFORE the initial applyConfig() call below) so the
   // applyConfig() body can call formatUInf without hitting TDZ.
   const UINF_UNIT = {
     lattice: { label: 'lattice', factor: 1, decimals: 3, suffix: '' },
     kmh:     { label: 'km/h',    factor: 500, decimals: 0, suffix: ' km/h' },
     mph:     { label: 'mph',     factor: 310, decimals: 0, suffix: ' mph' },
+    knots:   { label: 'knots',   factor: 270, decimals: 0, suffix: ' kn' },
   };
   let currentUInfUnit = 'kmh';
   function formatUInf(latticeValue) {
@@ -3524,8 +3532,16 @@ async function main() {
   // label whenever the slider moves. Override its body by directly
   // setting textContent after the fact — both listeners fire and the
   // last one wins. To keep it clean, we wrap the existing handler.
+  // r34: slider range is now 0.02..0.60 (was 0.20) — pulled from the
+  // DOM each frame so changing the HTML max doesn't drift from the
+  // plot range. Also: shows the "⚠ sim unstable" badge above ~75 km/h
+  // (u > 0.15 lattice) so users know when they're outside the LBM
+  // validity envelope without having to read the tooltip.
   function refreshUInfLabel() {
-    uInfVal.textContent = formatUInf(parseFloat(uInfInput.value));
+    const v = parseFloat(uInfInput.value);
+    uInfVal.textContent = formatUInf(v);
+    const warnEl = document.getElementById('u-inf-warn');
+    if (warnEl) warnEl.style.display = (v > 0.15) ? 'inline' : 'none';
   }
   document.querySelectorAll('#u-inf-unit-toggle .seg-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3656,7 +3672,11 @@ async function main() {
       return;
     }
     // X axis: wind speed in current unit. Y axis: Cd (always unitless).
-    const uMin = 0.02, uMax = 0.20;
+    // r34: slider range is now 0.02..0.60 (was 0.20) — pulled from the
+    // DOM each frame so changing the HTML max doesn't drift from the
+    // plot range.
+    const uMin = parseFloat(uInfInput.min);
+    const uMax = parseFloat(uInfInput.max);
     const uFactor = UINF_UNIT[currentUInfUnit].factor;
     const xToPx = (u) => ((u - uMin) / (uMax - uMin)) * w;
     let cdMin = Infinity, cdMax = -Infinity;
