@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r41-2026-07-24 (oscillating inflow: sinusoidal gust at the inlet; 3 amplitude sliders (amp_x streamwise / amp_y lateral / amp_z vertical) + frequency slider; cross-stream modulation (amp_y or amp_z > 0) builds up into a Karman vortex street behind the obstacle. Defaults all zero → r38 uniform inflow.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r42-2026-07-24 (vorticity colormap: select 'vorticity magnitude |∇×u|' from the colormap field dropdown to highlight shear layers and vortex shedding in the wake. Vorticity is computed every step on both CPU and WebGPU backends. Field modes: density (default) | velocity magnitude | vorticity magnitude | pressure (signed). All fields are always computed; only the colormap mapping changes.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -369,6 +369,15 @@
           <input type="checkbox" id="smoke-toggle" checked style="width:14px;height:14px;cursor:pointer">
           <span class="lbl-text">smoke <span class="help" data-tip="Passive scalar (smoke) layer. Injected at the inlet (=1) and advected by the velocity field, with slow per-step decay. Rendered as a darker viridis (dark purple/blue) volumetric layer UNDER the density viridis. Much more intuitive than streamlines alone for showing flow recirculation, vortex shedding, and wake separation behind the artifact. Zero cost when off (the second ray-march pass is gated). Smoke values cluster in [0, 0.5] in steady state; the visible range is 0.05..0.5 mapped onto viridis t = 0.0..0.30.">?</span></span>
         </label>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">colormap field <span class="help" data-tip="r42: Choose which scalar field drives the volumetric ray-march colormap. Density (default) = pressure buildup (cs²·(ρ-ρ0)) around the obstacle. Velocity = velocity magnitude |u| — shows acceleration around the artifact. Vorticity = |∇×u| — highlights shear layers and vortex shedding in the wake; the most visually striking colormap for wake-dominated flows (cube, sphere, cylinder). Pressure = signed pressure (red = compression, blue = expansion). Zero cost when the field is changed — the field is always computed, only the colormap mapping changes.">?</span></span></label>
+        <select id="field-mode-select" style="width:100%;padding:4px;background:rgba(255,255,255,0.06);color:#eee;border:1px solid rgba(255,255,255,0.18);border-radius:4px;font:inherit">
+          <option value="0">density (pressure buildup)</option>
+          <option value="1">velocity magnitude</option>
+          <option value="2">vorticity magnitude |∇×u|</option>
+          <option value="3">pressure (signed)</option>
+        </select>
       </div>
       <div class="control">
         <label><span class="lbl-text">smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
@@ -1618,6 +1627,11 @@ class CpuCompute {
     this.config = null;
     this.density = new Float32Array(spec.nx * spec.ny * spec.nz);
     this.velMag = new Float32Array(spec.nx * spec.ny * spec.nz);
+    // r42: vorticity magnitude |∇×u| at every cell. Computed via central
+    // differences inside _refreshDensity from the solver's grid.u. Same
+    // apply-on-fluid-only policy as density/velMag — solid cells hold 0
+    // so the volumetric ray-march cleanly skips them.
+    this.vortMag = new Float32Array(spec.nx * spec.ny * spec.nz);
   }
   reset(config) {
     this.config = config;
@@ -1651,17 +1665,69 @@ class CpuCompute {
   get smokeArray() { return this.smoke; }
   _refreshDensity() {
     const n = this.solver.grid.n;
+    const g = this.solver.grid;
+    const nx = g.nx, ny = g.ny, nz = g.nz;
+    const u = g.u;
+    // r42: precompute offset from a cell to its y±1 / z±1 neighbours.
+    // Same for every x in that (y, z) line — cached as 4 Int32Arrays
+    // indexed by (y*nz + z). Saves 4 multiplies per cell.
+    const yPlaneSize = ny * nz;
+    const ymShift = new Int32Array(yPlaneSize);
+    const ypShift = new Int32Array(yPlaneSize);
+    const zmShift = new Int32Array(yPlaneSize);
+    const zpShift = new Int32Array(yPlaneSize);
+    for (let yz = 0; yz < yPlaneSize; yz++) {
+      const y = (yz / nz) | 0;
+      const z = yz % nz;
+      const linY = y * nx + z * nx * ny;
+      ymShift[yz] = (Math.max(y - 1, 0) * nx + z * nx * ny) - linY;
+      ypShift[yz] = (Math.min(y + 1, ny - 1) * nx + z * nx * ny) - linY;
+      zmShift[yz] = (y * nx + Math.max(z - 1, 0) * nx * ny) - linY;
+      zpShift[yz] = (y * nx + Math.min(z + 1, nz - 1) * nx * ny) - linY;
+    }
     for (let i = 0; i < n; i++) {
       if (this.solver.solid[i]) {
         this.density[i] = 0;
         this.velMag[i] = 0;
+        this.vortMag[i] = 0;
         continue;
       }
-      this.density[i] = this.solver.grid.rho[i];
-      const ux = this.solver.grid.u[i * 3];
-      const uy = this.solver.grid.u[i * 3 + 1];
-      const uz = this.solver.grid.u[i * 3 + 2];
+      this.density[i] = g.rho[i];
+      const ux = u[i * 3];
+      const uy = u[i * 3 + 1];
+      const uz = u[i * 3 + 2];
       this.velMag[i] = Math.sqrt(ux * ux + uy * uy + uz * uz);
+      // r42: vorticity ω = ∇×u via central differences.
+      // i = x + y*nx + z*nx*ny. yz = (i / nx) | 0 (integer div via
+      // OR-0 is ~3x faster than Math.floor on V8). Solid neighbours
+      // hold 0 in u (set by the solid branch of the macroscopic kernel),
+      // so the central differences naturally degrade to one-sided at
+      // solid interfaces — visually fine for the wake / shear-layer
+      // regions where vorticity is high.
+      const yz = (i / nx) | 0;
+      const x = i - (i / nx | 0) * nx;
+      const xm = x > 0 ? -1 : 0;
+      const xp = x < nx - 1 ? 1 : 0;
+      const iYm = i + ymShift[yz];
+      const iYp = i + ypShift[yz];
+      const iZm = i + zmShift[yz];
+      const iZp = i + zpShift[yz];
+      const uyYp = u[iYp * 3 + 1];
+      const uyYm = u[iYm * 3 + 1];
+      const uyZp = u[iZp * 3 + 1];
+      const uyZm = u[iZm * 3 + 1];
+      const uzYp = u[iYp * 3 + 2];
+      const uzYm = u[iYm * 3 + 2];
+      const uxZp = u[iZp * 3 + 0];
+      const uxZm = u[iZm * 3 + 0];
+      const uzXp = u[(i + xp) * 3 + 2];
+      const uzXm = u[(i + xm) * 3 + 2];
+      const uxYp = u[iYp * 3 + 0];
+      const uxYm = u[iYm * 3 + 0];
+      const wx = (uzYp - uzYm) * 0.5 - (uyZp - uyZm) * 0.5;
+      const wy = (uxZp - uxZm) * 0.5 - (uzXp - uzXm) * 0.5;
+      const wz = (uyXp - uyXm) * 0.5 - (uxYp - uxYm) * 0.5;
+      this.vortMag[i] = Math.sqrt(wx * wx + wy * wy + wz * wz);
     }
   }
   get solid() { return this.solver.solid; }
@@ -1759,6 +1825,11 @@ const OPPOSITE = array<u32, 19>(
 @group(0) @binding(6) var<storage, read_write> u_buf: array<f32>;
 @group(0) @binding(7) var<storage, read> smoke_buf_in: array<f32>;
 @group(0) @binding(8) var<storage, read_write> smoke_buf_out: array<f32>;
+// r42: vorticity magnitude buffer. Same dispatch as the macroscopic
+// kernel — every cell writes |∇×u| using freshly-computed u_buf
+// neighbors from the surrounding 6-cell stencil. Clamped at the domain
+// boundary (clamped neighbor indices) to avoid OOB reads.
+@group(0) @binding(9) var<storage, read_write> vort_mag_buf: array<f32>;
 
 @compute @workgroup_size(8, 4, 2)
 fn collision(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1887,6 +1958,44 @@ fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
   u_buf[cell * 3u + 0u] = ux;
   u_buf[cell * 3u + 1u] = uy;
   u_buf[cell * 3u + 2u] = uz;
+  // r42: vorticity magnitude |∇×u| via central differences on the
+  // freshly-written u_buf. Domain boundaries are clamped (the clamp
+  // gives a one-sided difference — fine for visualization). Solid
+  // cells hold 0 in u; central differences over solid neighbors
+  // naturally degrade to one-sided using 0, fine for the high-|ω|
+  // regions where vorticity is what we want to see.
+  let xm = max(x, 1u) - 1u;
+  let xp = min(x + 1u, params.nx - 1u);
+  let ym = max(y, 1u) - 1u;
+  let yp = min(y + 1u, params.ny - 1u);
+  let zm = max(z, 1u) - 1u;
+  let zp = min(z + 1u, params.nz - 1u);
+  let nx = params.nx;
+  let ny = params.ny;
+  let cellXm = xm + y * nx + z * nx * ny;
+  let cellXp = xp + y * nx + z * nx * ny;
+  let cellYm = x + ym * nx + z * nx * ny;
+  let cellYp = x + yp * nx + z * nx * ny;
+  let cellZm = x + y * nx + zm * nx * ny;
+  let cellZp = x + y * nx + zp * nx * ny;
+  let uyYp = u_buf[cellYp * 3u + 1u];
+  let uyYm = u_buf[cellYm * 3u + 1u];
+  let uyZp = u_buf[cellZp * 3u + 1u];
+  let uyZm = u_buf[cellZm * 3u + 1u];
+  let uzYp = u_buf[cellYp * 3u + 2u];
+  let uzYm = u_buf[cellYm * 3u + 2u];
+  let uxZp = u_buf[cellZp * 3u + 0u];
+  let uxZm = u_buf[cellZm * 3u + 0u];
+  let uzXp = u_buf[cellXp * 3u + 2u];
+  let uzXm = u_buf[cellXm * 3u + 2u];
+  let uxYp = u_buf[cellYp * 3u + 0u];
+  let uxYm = u_buf[cellYm * 3u + 0u];
+  let uyXp = u_buf[cellXp * 3u + 1u];
+  let uyXm = u_buf[cellXm * 3u + 1u];
+  let wx = (uzYp - uzYm) * 0.5 - (uyZp - uyZm) * 0.5;
+  let wy = (uxZp - uxZm) * 0.5 - (uzXp - uzXm) * 0.5;
+  let wz = (uyXp - uyXm) * 0.5 - (uxYp - uxYm) * 0.5;
+  vort_mag_buf[cell] = sqrt(wx * wx + wy * wy + wz * wz);
 }
 
 // r38: passive scalar (smoke) advection kernel. One cell per
@@ -1969,6 +2078,9 @@ class WebGPUCompute {
     this.densityCpu = new Float32Array(this.n);
     this.velMagCpu = new Float32Array(this.n);
     this.smokeCpu = new Float32Array(this.n);
+    // r42: CPU-side mirror of the vorticity magnitude storage buffer.
+    // Updated by readback() alongside density and velMag.
+    this.vortMagCpu = new Float32Array(this.n);
     this.stepCount = 0;
     this.config = null;
     // r38: scalar advection uses ping-pong buffers (smokeA → smokeB).
@@ -1987,6 +2099,11 @@ class WebGPUCompute {
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        // r42: vorticity magnitude buffer. Written by the macroscopic
+        // kernel (same pass that writes density + velMag + u_buf) — no
+        // separate kernel/dispatch needed. Read back to JS for the
+        // renderer's volumetric ray-march colormap.
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       ],
     });
     const module = device.createShaderModule({ code: WGSL_LBM });
@@ -2023,6 +2140,12 @@ class WebGPUCompute {
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     this.velMagBuf = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    // r42: per-cell vorticity magnitude |∇×u|. Written by the macroscopic
+    // kernel from the just-updated u_buf neighbors. STORAGE for the write,
+    // COPY_SRC for the readback mirror.
+    this.vortMagBuf = this.device.createBuffer({
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     // r38: per-cell velocity components for the scalar advection kernel.
@@ -2063,6 +2186,8 @@ class WebGPUCompute {
         { binding: 6, resource: { buffer: this.uBuf } },
         { binding: 7, resource: { buffer: inBuf } },
         { binding: 8, resource: { buffer: outBuf } },
+        // r42: vorticity magnitude buffer (written by macroscopic kernel).
+        { binding: 9, resource: { buffer: this.vortMagBuf } },
       ],
     });
   }
@@ -2295,6 +2420,17 @@ class WebGPUCompute {
     this.velMagCpu.set(new Float32Array(tmp2.getMappedRange().slice(0)));
     tmp2.unmap();
     tmp2.destroy();
+    // r42: readback the vorticity magnitude buffer.
+    const tmp3 = this.device.createBuffer({
+      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const cmd3 = this.device.createCommandEncoder();
+    cmd3.copyBufferToBuffer(this.vortMagBuf, 0, tmp3, 0, this.n * 4);
+    this.device.queue.submit([cmd3.finish()]);
+    await tmp3.mapAsync(GPUMapMode.READ);
+    this.vortMagCpu.set(new Float32Array(tmp3.getMappedRange().slice(0)));
+    tmp3.unmap();
+    tmp3.destroy();
   }
 
   // Drag: copy f+u to CPU then run JS drag. Heavyweight; we run async every
@@ -2312,6 +2448,8 @@ class WebGPUCompute {
   // Compatibility shim: the renderer reads these synchronously.
   get density() { return this.densityCpu; }
   get velMag() { return this.velMagCpu; }
+  // r42: vorticity magnitude mirror exposed to the renderer.
+  get vortMag() { return this.vortMagCpu; }
   get solid() { return this.solidCpu; }
 }
 
@@ -2344,7 +2482,7 @@ uniform float u_densityScale;
 uniform int u_debugMode;
 uniform float u_alphaScale;
 uniform int   u_steps;
-uniform int   u_fieldMode; // 0 = density, 1 = velocity magnitude
+uniform int   u_fieldMode; // r42: 0 = density (default), 1 = velocity magnitude, 2 = vorticity magnitude |∇×u|, 3 = pressure (signed)
 uniform float u_solidOpacity;
 uniform int   u_smokeEnabled;     // r38: 0 = off, 1 = on
 uniform float u_smokeOpacity;     // r38: 0..1 master opacity on smoke layer
@@ -2420,23 +2558,44 @@ void main() {
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
 
     float val = texture(u_volume, uvw).r;
-    // r32: purple-tile regression at glancing camera angles (e.g.
-    // rot-x=90°, rot-z=180° looking down the volume axis) was caused
-    // by FP-noise voxels in bulk flow (val ≈ 1.005-1.015) passing the
-    // old threshold of 0.05. Each leaked ~1% alpha; 100+ voxels along
-    // a long glancing ray → accumulated dark-purple wash. Raised
-    // threshold to 0.15 so only true pressure buildup (val > 1.03,
-    // wake/around-obstacle) contributes. Also lifted the viridis
-    // floor so anything just barely above threshold doesn't render
-    // the dark c0 magenta — saturates the lower band to a cleaner
-    // dark-blue instead, which blends with the bg color (0.043, 0.051,
-    // 0.071) rather than fighting it.
-    float d = max(val - 1.0, 0.0) * u_densityScale;
-    if (d < 0.15) continue;
-    // Map d ∈ [0.15, 1.0] → viridis t ∈ [0.30, 1.0] so the lowest
-    // contributing voxel is mid-blue (c2 ≈ vec3(0.254, 0.265, 0.530))
-    // instead of dark purple.
-    float vT = 0.30 + 0.70 * clamp((d - 0.15) / 0.85, 0.0, 1.0);
+    // r42: per-field-mode mapping. Each mode has its own (val → d) and
+    // (d → color) transform so the user can A/B compare fields under
+    // the same scene without changing the camera or layout.
+    //
+    //   mode 0 (density):   d = max(val - 1.0, 0.0) * scale
+    //                       threshold 0.15, viridis t ∈ [0.30, 1.0]
+    //   mode 1 (velocity):  d = val * scale
+    //                       threshold 0.05, viridis t ∈ [0.30, 1.0]
+    //   mode 2 (vorticity): d = val * scale   // |∇×u|, always ≥ 0
+    //                       threshold 0.20, viridis t ∈ [0.30, 1.0]
+    //                       (0.20 ≈ ¼ of an avg. cube-wake peak |ω|)
+    //   mode 3 (pressure):  d = abs(val) * scale  // signed, see loader
+    //                       threshold 0.05, viridis t ∈ [0.30, 1.0]
+    float d = 0.0;
+    float thr = 0.15;
+    float vTMin = 0.30;
+    float vTRange = 0.70;
+    if (u_fieldMode == 0) {
+      d = max(val - 1.0, 0.0) * u_densityScale;
+      thr = 0.15;
+    } else if (u_fieldMode == 1) {
+      d = val * u_densityScale * 0.30;
+      thr = 0.05;
+    } else if (u_fieldMode == 2) {
+      // r42: vorticity magnitude. u_densityScale is shared with
+      // density — bump it back up so the cube's shear layers (typical
+      // |ω| ≈ 0.5..1.0) saturate the viridis t ∈ [0.30, 1.0] range.
+      d = val * u_densityScale * 5.0;
+      thr = 0.20;
+    } else if (u_fieldMode == 3) {
+      // r42: pressure. Signed scalar re-encoded as |val| in the loader
+      // (range-mapping into [0, 1] for R32F upload); see renderer
+      // uploadVolume().
+      d = val * u_densityScale * 80.0;
+      thr = 0.05;
+    }
+    if (d < thr) continue;
+    float vT = vTMin + vTRange * clamp((d - thr) / (1.0 - thr), 0.0, 1.0);
     vec3 color = viridis(vT);
     // r17: clamp alpha to 0.35 max per fragment so even dense pressure
     // buildup doesn't fully saturate the volume. Prevents the faded-purple
@@ -3801,6 +3960,79 @@ function registerTests(tr) {
     tr.assert(nanCount === 0, `expected 0 NaN density cells, got ${nanCount}`);
   });
 
+  // -- r42: vorticity colormap --
+  // 1. The vortMag field must be allocated at solver creation (CpuCompute
+  //    constructor) and writeable after step().
+  tr.test('r42_vortMag_allocated_and_written', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    tr.assert(solver.vortMag instanceof Float32Array, 'vortMag must be a Float32Array');
+    tr.assert(solver.vortMag.length === 16 * 16 * 16, `vortMag length = ${solver.vortMag.length}, expected 4096`);
+    for (let i = 0; i < solver.vortMag.length; i++) {
+      tr.assert(solver.vortMag[i] === 0, `vortMag[${i}] must init to 0, got ${solver.vortMag[i]}`);
+    }
+    for (let i = 0; i < 5; i++) solver.step();
+    // After stepping, vortMag must have been touched (at least one non-zero
+    // cell from the inlet shear at the boundary).
+    let nz = 0;
+    for (let i = 0; i < solver.vortMag.length; i++) {
+      if (solver.vortMag[i] > 0) nz++;
+    }
+    tr.assert(nz > 0, `vortMag should be nonzero in at least one cell after stepping, got ${nz}`);
+  });
+  // 2. Vorticity must be zero for a uniform flow field with no obstacles.
+  //    Central-difference of (u_inf, 0, 0) on a flat profile is exactly 0.
+  //    Use 100 steps so the inlet boundary has time to settle.
+  tr.test('r42_vorticity_zero_for_uniform_flow', () => {
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 100; i++) solver.step();
+    let maxVort = 0;
+    for (let i = 0; i < solver.vortMag.length; i++) {
+      if (solver.vortMag[i] > maxVort) maxVort = solver.vortMag[i];
+    }
+    // Bulk flow has no shear. Max vorticity should be tiny (numerical noise
+    // only). We allow a small threshold since the inlet boundary does have
+    // a slight velocity gradient during the first ~50 steps.
+    tr.assert(maxVort < 0.02, `uniform flow max vorticity = ${maxVort}, expected < 0.02`);
+  });
+  // 3. With an obstacle, vorticity in the wake must be substantially
+  //    nonzero (shear layers off the cube faces).
+  tr.test('r42_vorticity_nonzero_in_shear_layer', () => {
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.08, rho0: 1.0, viscosity: 0.03,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 200; i++) solver.step();
+    let maxVort = 0;
+    let nz = 0;
+    for (let i = 0; i < solver.vortMag.length; i++) {
+      if (solver.vortMag[i] > maxVort) maxVort = solver.vortMag[i];
+      if (solver.vortMag[i] > 0.05) nz++;
+    }
+    tr.assert(maxVort > 0.10, `wake max vorticity = ${maxVort}, expected > 0.10 (shear layer)`);
+    tr.assert(nz > 50, `expected > 50 cells with vortMag > 0.05, got ${nz}`);
+  });
+  // 4. Vorticity inside the solid obstacle must be exactly 0 (the
+  //    field is masked to 0 for solid cells, so the volumetric
+  //    colormap doesn't show spurious streaks inside the cube).
+  tr.test('r42_vorticity_zero_inside_solid', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 50; i++) solver.step();
+    let solidVort = 0;
+    for (let z = -2; z <= 2; z++) {
+      for (let y = -2; y <= 2; y++) {
+        for (let x = -2; x <= 2; x++) {
+          const i = solver.grid.lin(x + 8, y + 8, z + 8);
+          if (solver.grid.solid[i]) {
+            tr.assert(solver.vortMag[i] === 0, `solid cell at (${x},${y},${z}) has vortMag = ${solver.vortMag[i]}`);
+          }
+        }
+      }
+    }
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -4387,6 +4619,11 @@ async function main() {
   // applyConfig() so the live decay can change without an init.
   let smokeEnabled = true;
   let smokeOpacity = 1.0;
+  // r42: which scalar field drives the volumetric ray-march colormap.
+  // 0 = density (default), 1 = velocity magnitude |u|, 2 = vorticity
+  // magnitude |∇×u|, 3 = pressure (signed). All fields are always
+  // computed; only the colormap mapping changes.
+  let fieldMode = 0;
 
   // Streamline tracer — initial 80 streamlines, each carrying a 96-point
   // trail (in burst mode) or a full inlet→outlet path (in permanent
@@ -4693,6 +4930,16 @@ async function main() {
   smokeToggle.addEventListener('change', () => {
     smokeEnabled = smokeToggle.checked;
   });
+  // r42: field-mode dropdown. The user's selection drives the
+  // volumetric ray-march mapping (density / velocity / vorticity /
+  // pressure). No reset — fields are always computed, only the
+  // colormap interpreter changes.
+  const fieldModeSelect = document.getElementById('field-mode-select');
+  if (fieldModeSelect) {
+    fieldModeSelect.addEventListener('change', () => {
+      fieldMode = parseInt(fieldModeSelect.value, 10);
+    });
+  }
   smokeOpacitySlider.addEventListener('input', () => {
     smokeOpacity = parseInt(smokeOpacitySlider.value, 10) / 100;
     smokeOpacityVal.textContent = smokeOpacitySlider.value + '%';
@@ -5046,9 +5293,19 @@ async function main() {
 
     // Renderer upload + draw.
     try {
+      // r42: pick which field to upload to the volumetric ray-march
+      // texture. The shader's u_fieldMode uniform selects the mapping
+      // (val → d, d → viridis t). Switch freely — backend.density /
+      // velMag / vortMag are always available; if the backend hasn't
+      // produced one yet the user gets a brief "no data" state.
+      const volumeData = (() => {
+        if (fieldMode === 1) return backend.velMag;
+        if (fieldMode === 2) return backend.vortMag;
+        return backend.density;
+      })();
       // CPU path: synchronous density. WebGPU: readback once in a while.
-      if (backend.density) {
-        renderer.uploadVolume(backend.density);
+      if (volumeData) {
+        renderer.uploadVolume(volumeData);
         // Diagnostic: track density range so we can see if data is flowing.
         if (window.__densityStats !== false) {
           if (!window.__densityStats) {
@@ -5068,7 +5325,11 @@ async function main() {
         }
       } else if (backend.readback) {
         backend.readback().then(() => {
-          if (backend.densityCpu) renderer.uploadVolume(backend.densityCpu);
+          const fMode = fieldMode; // capture current value at callback time
+          let data = backend.densityCpu;
+          if (fMode === 1) data = backend.velMagCpu;
+          else if (fMode === 2) data = backend.vortMagCpu;
+          if (data) renderer.uploadVolume(data);
         });
       }
       // r38: smoke upload. CPU path: synchronous via `backend.smoke`
@@ -5104,7 +5365,7 @@ async function main() {
           densityScale: 5.0,    // r16: scale up after baseline subtraction. d = (val-1)*5 → max ≈ 2.5 → viridis teal-green for pressure regions, 0 (skipped) for bulk.
           alphaScale: 0.20,     // r16: higher alpha per step since baseline subtraction removes bulk contribution; cumulative alpha ≈ 0.40 max where there IS pressure buildup.
           steps: 128,          // r9: doubled steps so the ray can resolve interior structure.
-          fieldMode: 0,
+          fieldMode,
           solidOpacity: 0.0,
           debugMode,
           // r38: smoke layer state. `smokeEnabled` is a top-level
