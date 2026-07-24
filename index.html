@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r37-2026-07-23 (trail-mode toggle no longer resets tracer — back-fills frozenTrails on burst→permanent for instant 'full tunnel' view, seamless switch)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r38-2026-07-24 (passive scalar smoke field — darker viridis layer in wake, shows recirculation & vortex shedding; toggle + opacity + decay sliders)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -357,6 +357,20 @@
       <div class="control">
         <label><span class="lbl-text">streamline opacity <span class="help" data-tip="How opaque the wind streamlines are. 100% = vivid flow visualization (default). 50% = subtle tracer that lets the volumetric density underneath show through. 0% = invisible streamlines, only the volumetric pressure field remains. Useful for decluttering when you have many streamlines or want to focus on the colormap.">?</span></span><span id="stream-opacity-val">100%</span></label>
         <input type="range" id="stream-opacity-slider" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="control">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="smoke-toggle" checked style="width:14px;height:14px;cursor:pointer">
+          <span class="lbl-text">smoke <span class="help" data-tip="Passive scalar (smoke) layer. Injected at the inlet (=1) and advected by the velocity field, with slow per-step decay. Rendered as a darker viridis (dark purple/blue) volumetric layer UNDER the density viridis. Much more intuitive than streamlines alone for showing flow recirculation, vortex shedding, and wake separation behind the artifact. Zero cost when off (the second ray-march pass is gated). Smoke values cluster in [0, 0.5] in steady state; the visible range is 0.05..0.5 mapped onto viridis t = 0.0..0.30.">?</span></span>
+        </label>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
+        <input type="range" id="smoke-opacity-slider" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">smoke decay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
+        <input type="range" id="smoke-decay-slider" min="0.95" max="1.00" step="0.001" value="0.998">
       </div>
       <div class="control">
         <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -541,6 +555,12 @@ class Grid {
     this.f = new Float32Array(this.n * Q);
     this.rho = new Float32Array(this.n);
     this.u = new Float32Array(this.n * 3);
+    // r38: passive scalar (smoke) — advected by the velocity field,
+    // injected at the inlet (= 1), decayed slowly, zeroed inside solids.
+    // Rendered as a darker viridis layer to show flow topology
+    // (recirculation, separation, wake) that streamlines can't reveal
+    // on their own. See LbmSolver._advectSmoke for the upwind stencil.
+    this.smoke = new Float32Array(this.n);
     const uSq = u_inf * u_inf;
     for (let i = 0; i < this.n; i++) {
       this.rho[i] = rho0;
@@ -874,13 +894,88 @@ class LbmSolver {
 
     // 4. Boundary conditions.
     this._applyBoundary();
+    // 5. r38: advect the passive smoke scalar by the velocity field.
+    // Upwind 3-axis stencil — for each axis, read the upwind neighbour's
+    // smoke value. Sign of velocity picks the upwind direction. Solid
+    // cells (and their upwind neighbours that are solid) contribute 0
+    // so smoke can't penetrate obstacles. The decay slider controls how
+    // fast the smoke fades; the inlet re-injects s=1 each step via
+    // _applyBoundary.
+    this._advectSmoke(this.config.smokeDecay ?? 0.998);
     this.stepCount++;
+  }
+
+  _advectSmoke(decay) {
+    const { nx, ny, nz } = this.config;
+    const u = this.grid.u;
+    const smoke = this.grid.smoke;
+    const solid = this.solid;
+    // Two passes (read into oldSmoke, write back) so each cell's
+    // new value only depends on the OLD field, not the new one. Avoids
+    // a directional bias (downstream would otherwise see upstream's
+    // already-updated value).
+    const oldSmoke = this._smokeScratch || (this._smokeScratch = new Float32Array(smoke.length));
+    oldSmoke.set(smoke);
+    const decayClamped = Math.max(0, Math.min(1, decay));
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          const i = x + y * nx + z * nx * ny;
+          // r38: skip x=0 (inlet) — _applyBoundary() sets smoke[0,y,z]
+          // = 1 there, and the upwind step would otherwise clobber it
+          // (sample of x=-1 returns 0 and overrides the inlet).
+          if (x === 0) continue;
+          if (solid[i]) { smoke[i] = 0; continue; }
+          const ux = u[i * 3 + 0];
+          const uy = u[i * 3 + 1];
+          const uz = u[i * 3 + 2];
+          // Upwind neighbour index per axis (clamped at domain edges).
+          // If velocity is +x, the upwind neighbour is x-1 (the cell
+          // that sent its smoke DOWN to us). If velocity is -x, it's x+1.
+          const xu = ux >= 0 ? x - 1 : x + 1;
+          const yu = uy >= 0 ? y - 1 : y + 1;
+          const zu = uz >= 0 ? z - 1 : z + 1;
+          // CFL-style weight: |u_axis| is the fraction of a cell the
+          // smoke moves per step in that axis. We mix the 3 axes by
+          // their magnitudes. CFL stability requires sum(|u|) ≤ 1
+          // (one cell per step); if the sum is > 1, normalize so the
+          // smoke never moves faster than one cell per step. When flow
+          // is exactly zero (sum=0), keep the old smoke (s = smoke[i]
+          // with no decay — advection is the identity for a still cell).
+          const ax = Math.abs(ux);
+          const ay = Math.abs(uy);
+          const az = Math.abs(uz);
+          const asum = ax + ay + az;
+          // Sample upwind neighbour smoke; if out of bounds or solid, use 0.
+          const sample = (xx, yy, zz) => {
+            if (xx < 0 || yy < 0 || zz < 0 || xx >= nx || yy >= ny || zz >= nz) return 0;
+            const j = xx + yy * nx + zz * nx * ny;
+            return solid[j] ? 0 : oldSmoke[j];
+          };
+          let s;
+          if (asum < 1e-9) {
+            s = oldSmoke[i];
+          } else {
+            // Normalize to total weight 1; CFL caps total advection at
+            // one cell per step (so smoke can't outrun the lattice).
+            const inv = 1 / asum;
+            const wx = ax * inv, wy = ay * inv, wz = az * inv;
+            s = wx * sample(xu, y, z) + wy * sample(x, yu, z) + wz * sample(x, y, zu);
+          }
+          // Clamp [0,1] so the user can drag the decay slider into any
+          // regime without producing NaN/garbage values.
+          smoke[i] = Math.max(0, Math.min(1, s * decayClamped));
+        }
+      }
+    }
   }
 
   _applyBoundary() {
     const { nx, ny, nz, u_inf, rho0 } = this.config;
     const uSq = u_inf * u_inf;
-    // Inlet (x=0): equilibrium at (u_inf, 0, 0)
+    // Inlet (x=0): equilibrium at (u_inf, 0, 0) — same for f AND smoke.
+    // Smoke is set to 1 at every non-solid inlet cell each step, so a
+    // continuous plume of smoke is generated and advected downstream.
     for (let z = 0; z < nz; z++) {
       for (let y = 0; y < ny; y++) {
         const i = this.grid.lin(0, y, z);
@@ -890,6 +985,9 @@ class LbmSolver {
           const cu = c[0] * u_inf;
           this.grid.f[i * Q + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSq);
         }
+        // r38: inject smoke at the inlet. Setting to 1 every step (not
+        // every applyConfig) keeps the source continuous as the sim runs.
+        this.grid.smoke[i] = 1;
       }
     }
     // Outlet (x=nx-1): copy from x=nx-2
@@ -1223,6 +1321,16 @@ class CpuCompute {
     this.solver.step();
     this._refreshDensity();
   }
+  // r38: smoke scalar — passive field advected by the velocity field.
+  // CPU path: read directly from the JS-side LbmSolver grid. The grid
+  // allocates the Float32Array once in the constructor and the solver
+  // mutates it in-place every step. No copy.
+  get smoke() { return this.solver ? this.solver.grid.smoke : null; }
+  // r38: symmetric accessor used by the renderer — same value as
+  // `smoke` on the CPU path, but the WebGPU backend exposes a
+  // readback mirror instead. Single-name means the render loop
+  // doesn't need to branch on backend type.
+  get smokeArray() { return this.smoke; }
   _refreshDensity() {
     const n = this.solver.grid.n;
     for (let i = 0; i < n; i++) {
@@ -1257,6 +1365,10 @@ struct Params {
   inv_tau: f32,
   u_inf: f32,
   rho0: f32,
+  // r38: passive scalar decay. Multiplied into the smoke field every
+  // step inside the scalarAdvect kernel. 0.998 = 1/e decay in ~500
+  // steps. Tunable via the smoke decay slider (0.95..1.00).
+  smoke_decay: f32,
 }
 
 const D3Q19 = array<vec3<f32>, 19>(
@@ -1300,6 +1412,20 @@ const OPPOSITE = array<u32, 19>(
 @group(0) @binding(3) var<uniform> params: Params;
 @group(0) @binding(4) var<storage, read_write> density_buf: array<f32>;
 @group(0) @binding(5) var<storage, read_write> vel_mag_buf: array<f32>;
+// r38: scalar-advection buffers.
+//   u_buf: per-cell velocity components (ux,uy,uz) — written by the
+//          macroscopic kernel so the scalarAdvect kernel can read them
+//          without re-deriving from f_buf (avoids 19x work per cell).
+//   smoke_buf_a, smoke_buf_b: ping-pong pair. scalarAdvect reads from
+//          one and writes to the other, and the binding is swapped
+//          each step. WGSL doesn't guarantee any ordering between
+//          threads in the same dispatch, so a single-buffer read+write
+//          scheme is racy: cell (x+1) might read the just-updated value
+//          at cell (x) instead of its old value. Ping-pong eliminates
+//          the race without needing memory barriers.
+@group(0) @binding(6) var<storage, read_write> u_buf: array<f32>;
+@group(0) @binding(7) var<storage, read> smoke_buf_in: array<f32>;
+@group(0) @binding(8) var<storage, read_write> smoke_buf_out: array<f32>;
 
 @compute @workgroup_size(8, 4, 2)
 fn collision(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1389,6 +1515,11 @@ fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (solid[cell] != 0u) {
     density_buf[cell] = 0.0;
     vel_mag_buf[cell] = 0.0;
+    // r38: zero velocity components in solid cells so scalarAdvect's
+    // upwind stencil samples 0 for any neighbour that is solid.
+    u_buf[cell * 3u + 0u] = 0.0;
+    u_buf[cell * 3u + 1u] = 0.0;
+    u_buf[cell * 3u + 2u] = 0.0;
     return;
   }
   var rho = 0.0; var mx = 0.0; var my = 0.0; var mz = 0.0;
@@ -1403,6 +1534,81 @@ fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ux = mx * inv; let uy = my * inv; let uz = mz * inv;
   density_buf[cell] = rho;
   vel_mag_buf[cell] = sqrt(ux * ux + uy * uy + uz * uz);
+  // r38: stash the velocity components for the scalar advection kernel.
+  // Doing it here (vs. re-deriving inside scalarAdvect) keeps the scalar
+  // kernel at ~1 memory op per neighbour instead of 19.
+  u_buf[cell * 3u + 0u] = ux;
+  u_buf[cell * 3u + 1u] = uy;
+  u_buf[cell * 3u + 2u] = uz;
+}
+
+// r38: passive scalar (smoke) advection kernel. One cell per
+// invocation, same workgroup size as the other kernels so dispatch
+// math is identical. Upwind 3-axis stencil — for each axis, sample
+// the upwind neighbour (the cell that sent its smoke DOWN to us) and
+// weight by |u_axis|. Mix the 3 axes by normalized magnitude, multiply
+// by params.smoke_decay. Solids and out-of-bounds neighbours contribute
+// 0. CFL: smoke never moves faster than 1 cell/step because the
+// per-axis weights are normalized (sum of |u_axis| ≤ 1 in stable regime).
+// Reads from smoke_buf_in, writes to smoke_buf_out (ping-pong). JS
+// swaps the bind-group entries each step so the just-written values
+// become the "old" values for the next step.
+@compute @workgroup_size(8, 4, 2)
+fn scalarAdvect(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x; let y = gid.y; let z = gid.z;
+  if (x >= params.nx || y >= params.ny || z >= params.nz) { return; }
+  let cell = x + y * params.nx + z * params.nx * params.ny;
+
+  // Inlet (x=0): re-inject smoke each step. A continuous plume of
+  // smoke = 1 enters the domain from the inlet face.
+  if (x == 0u) {
+    smoke_buf_out[cell] = 1.0;
+    return;
+  }
+
+  // Solid: zero and bail. (smoke can't be inside an obstacle.)
+  if (solid[cell] != 0u) {
+    smoke_buf_out[cell] = 0.0;
+    return;
+  }
+
+  let ux = u_buf[cell * 3u + 0u];
+  let uy = u_buf[cell * 3u + 1u];
+  let uz = u_buf[cell * 3u + 2u];
+
+  // Upwind neighbour per axis: if velocity is +x, smoke came from x-1.
+  let xu = select(x + 1u, x - 1u, ux >= 0.0);
+  let yu = select(y + 1u, y - 1u, uy >= 0.0);
+  let zu = select(z + 1u, z - 1u, uz >= 0.0);
+
+  let ax = abs(ux); let ay = abs(uy); let az = abs(uz);
+  let asum = ax + ay + az;
+
+  // Sample helper: out-of-bounds or solid -> 0.
+  let nx_i = params.nx; let ny_i = params.ny; let nz_i = params.nz;
+  let sample = fn(xx: u32, yy: u32, zz: u32) -> f32 {
+    if (xx >= nx_i || yy >= ny_i || zz >= nz_i) { return 0.0; }
+    let j = xx + yy * nx_i + zz * nx_i * ny_i;
+    if (solid[j] != 0u) { return 0.0; }
+    return smoke_buf_in[j];
+  };
+
+  var s: f32;
+  if (asum < 1e-9) {
+    // No flow at this cell — keep the old smoke value (advection is
+    // the identity for a still cell). Decay still applies.
+    s = smoke_buf_in[cell];
+  } else {
+    // Normalize weights so the 3 axes sum to 1. CFL cap implicit in
+    // |u_axis| ≤ 1 per axis in the stable regime.
+    let inv = 1.0 / asum;
+    let wx = ax * inv; let wy = ay * inv; let wz = az * inv;
+    s = wx * sample(xu, y, z) + wy * sample(x, yu, z) + wz * sample(x, y, zu);
+  }
+  // Decay + clamp [0,1]. params.smoke_decay is set from the smoke
+  // decay slider; clamping guards against slider values > 1.
+  let d = clamp(params.smoke_decay, 0.0, 1.0);
+  smoke_buf_out[cell] = clamp(s * d, 0.0, 1.0);
 }
 `;
 
@@ -1415,9 +1621,14 @@ class WebGPUCompute {
     this.solidCpu = new Uint8Array(this.n);
     this.densityCpu = new Float32Array(this.n);
     this.velMagCpu = new Float32Array(this.n);
+    this.smokeCpu = new Float32Array(this.n);
     this.stepCount = 0;
     this.config = null;
-    // Create bind group layout shared by all three pipelines.
+    // r38: scalar advection uses ping-pong buffers (smokeA → smokeB).
+    // We bind whichever is "in" to binding 7 and whichever is "out" to
+    // binding 8. swapPingPong() flips them after each step.
+    this._smokePing = 0;
+    // Create bind group layout shared by all four pipelines.
     this.bgl = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
@@ -1426,6 +1637,9 @@ class WebGPUCompute {
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       ],
     });
     const module = device.createShaderModule({ code: WGSL_LBM });
@@ -1438,6 +1652,11 @@ class WebGPUCompute {
     });
     this.macroPipeline = device.createComputePipeline({
       layout: pl, compute: { module, entryPoint: 'macroscopic' },
+    });
+    // r38: scalar advection pipeline — fourth kernel, same module
+    // (entry point defined in the WGSL string above).
+    this.scalarAdvectPipeline = device.createComputePipeline({
+      layout: pl, compute: { module, entryPoint: 'scalarAdvect' },
     });
     this._allocateBuffers();
   }
@@ -1459,9 +1678,32 @@ class WebGPUCompute {
     this.velMagBuf = this.device.createBuffer({
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
-    this.paramsBuf = this.device.createBuffer({
-      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    // r38: per-cell velocity components for the scalar advection kernel.
+    this.uBuf = this.device.createBuffer({
+      size: n * 3 * 4, usage: GPUBufferUsage.STORAGE,
     });
+    // r38: ping-pong smoke buffers. Both are storage (write+read from
+    // different bindings) and COPY_SRC (for the readback path).
+    this.smokeBufA = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.smokeBufB = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    // Params buffer grew from 32B to 48B (added smoke_decay f32).
+    this.paramsBuf = this.device.createBuffer({
+      size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._buildBindGroup();
+  }
+
+  // r38: build the bind group with the current ping-pong orientation.
+  // Called from _allocateBuffers() and from swapPingPong() after each
+  // step. The non-smoke bindings (0..6) are static; bindings 7 and 8
+  // swap between smokeBufA and smokeBufB.
+  _buildBindGroup() {
+    const inBuf = this._smokePing === 0 ? this.smokeBufA : this.smokeBufB;
+    const outBuf = this._smokePing === 0 ? this.smokeBufB : this.smokeBufA;
     this.bg = this.device.createBindGroup({
       layout: this.bgl,
       entries: [
@@ -1471,8 +1713,19 @@ class WebGPUCompute {
         { binding: 3, resource: { buffer: this.paramsBuf } },
         { binding: 4, resource: { buffer: this.densityBuf } },
         { binding: 5, resource: { buffer: this.velMagBuf } },
+        { binding: 6, resource: { buffer: this.uBuf } },
+        { binding: 7, resource: { buffer: inBuf } },
+        { binding: 8, resource: { buffer: outBuf } },
       ],
     });
+  }
+
+  // r38: flip the ping-pong orientation. Called from step() after the
+  // scalar advection kernel writes to "out" so the next step reads
+  // from the just-written buffer as the "in".
+  swapPingPong() {
+    this._smokePing = this._smokePing === 0 ? 1 : 0;
+    this._buildBindGroup();
   }
 
   reset(config) {
@@ -1510,14 +1763,25 @@ class WebGPUCompute {
       }
     }
     this.device.queue.writeBuffer(this.solidBuf, 0, solid);
+    // r38: clear smoke buffers on reset. The scalar advection kernel
+    // re-injects smoke at the inlet every step, so clearing once at
+    // reset is enough to avoid stale smoke from the previous config.
+    this.device.queue.writeBuffer(this.smokeBufA, 0, new Float32Array(nx * ny * nz));
+    this.device.queue.writeBuffer(this.smokeBufB, 0, new Float32Array(nx * ny * nz));
     // Params.
     const tau = viscosity / (1 / 3) + 0.5;
+    // r38: 8th f32 slot is smoke_decay. Smoke buffer is reset; the
+    // scalar advection kernel starts injecting at the inlet from the
+    // next step.
     const paramsData = new Float32Array([
       nx, ny, nz, 1 / 3,
-      1 / tau, u_inf, rho0, 0,
+      1 / tau, u_inf, rho0, config.smokeDecay ?? 0.998,
     ]);
     const paramsU32 = new Uint32Array(paramsData.buffer);
     this.device.queue.writeBuffer(this.paramsBuf, 0, paramsU32);
+    // r38: reset ping-pong orientation to the initial state.
+    this._smokePing = 0;
+    this._buildBindGroup();
     // Initial macroscopic.
     this._dispatchInitial();
   }
@@ -1558,9 +1822,71 @@ class WebGPUCompute {
       Math.ceil(this.spec.ny / 4),
       Math.ceil(this.spec.nz / 2),
     );
+    // r38: scalar advection. Reads u_buf (written by macro) and the
+    // current "in" smoke buffer; writes to "out". Run after macro so
+    // we advect by the freshest velocity. The bind group is then
+    // swapped (out → in) so the next step reads the just-written values.
+    pass.setPipeline(this.scalarAdvectPipeline);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.spec.nx / 8),
+      Math.ceil(this.spec.ny / 4),
+      Math.ceil(this.spec.nz / 2),
+    );
     pass.end();
     this.device.queue.submit([cmd.finish()]);
+    // r38: flip the ping-pong so the next step's "in" is this step's "out".
+    this.swapPingPong();
     this.stepCount++;
+  }
+
+  // r38: smoke scalar — last-written buffer is whichever the scalar
+  // advection kernel just wrote to. We always readback from that one.
+  get smoke() {
+    // After a step(), the just-written buffer is the one bound to
+    // binding 8 in the previous bind group; after swapPingPong(), that
+    // becomes binding 7 ("in") and binding 8 is the NEW "out" (stale).
+    // We track it explicitly: it was "out" before the swap.
+    return this._smokePing === 0 ? this.smokeBufA : this.smokeBufB;
+  }
+
+  // r38: return a Float32Array view of the latest smoke field for the
+  // CPU-side renderer. The CPU-side readback mirror (`smokeCpu`) is
+  // updated by readbackSmoke(); if it has never been read, this returns
+  // a zero-filled array so the renderer doesn't render garbage.
+  get smokeArray() {
+    if (this._smokeReadback) {
+      // Readback in flight — return a zero array to avoid a race
+      // condition where we'd otherwise expose a half-updated buffer.
+      // The next frame's readback will land and the renderer will pick
+      // it up.
+      return new Float32Array(this.n);
+    }
+    return this.smokeCpu;
+  }
+
+  // r38: read the latest smoke buffer to CPU. Called from render loop
+  // (async) to keep the JS-side `smokeCpu` mirror up to date.
+  async readbackSmoke() {
+    const inFlight = this._smokeReadback;
+    if (inFlight) await inFlight;
+    const buf = this.smoke;
+    const tmp = this.device.createBuffer({
+      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const cmd = this.device.createCommandEncoder();
+    cmd.copyBufferToBuffer(buf, 0, tmp, 0, this.n * 4);
+    this.device.queue.submit([cmd.finish()]);
+    const promise = tmp.mapAsync(GPUMapMode.READ).then(() => {
+      this.smokeCpu.set(new Float32Array(tmp.getMappedRange().slice(0)));
+      tmp.unmap();
+      tmp.destroy();
+    }).catch((e) => {
+      tmp.destroy();
+      throw e;
+    });
+    this._smokeReadback = promise;
+    await promise;
+    this._smokeReadback = null;
   }
 
   async readback() {
@@ -1625,6 +1951,7 @@ in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler3D u_volume;
+uniform sampler3D u_smoke;        // r38: passive scalar (smoke) field.
 uniform mat4 u_invViewProj;
 uniform vec3 u_cameraPos;
 uniform vec3 u_volumeMin;
@@ -1636,6 +1963,8 @@ uniform float u_alphaScale;
 uniform int   u_steps;
 uniform int   u_fieldMode; // 0 = density, 1 = velocity magnitude
 uniform float u_solidOpacity;
+uniform int   u_smokeEnabled;     // r38: 0 = off, 1 = on
+uniform float u_smokeOpacity;     // r38: 0..1 master opacity on smoke layer
 
 // 6-stop viridis (dark purple -> teal-green)
 vec3 viridis(float t) {
@@ -1734,6 +2063,56 @@ void main() {
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
   }
+  // r38: smoke layer — second pass over the same ray (re-using the
+  // jittered entry + same step count). Reads the smoke scalar from a
+  // parallel 3D texture and accumulates as a darker viridis (c0→c2,
+  // t ∈ [0.0, 0.30]) on top of whatever the density pass produced.
+  // Front-to-back compositing means the smoke blends UNDER the density
+  // viridis — a dark blue/violet haze in the wake that doesn't fight
+  // the brighter density signal around the obstacle. Gated on
+  // u_smokeEnabled so turning it off is free (no second pass cost).
+  if (u_smokeEnabled == 1) {
+    vec3 accumColor2 = vec3(0.0);
+    float accumAlpha2 = 0.0;
+    for (int i = 0; i < 256; i++) {
+      if (i >= u_steps) break;
+      float t = tStart + float(i) * dt;
+      if (t > tFar) break;
+      vec3 p = ro + rd * t;
+      vec3 uvw = (p - u_volumeMin) / (u_volumeSize);
+      if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
+      float s = texture(u_smoke, uvw).r;
+      // Below threshold = no contribution (avoids the dark c0 wash
+      // everywhere). The scalar advection kernel has been decaying
+      // for ~500 steps, so smoke values cluster in [0, 0.5] in steady
+      // state; we want the visible range to be ~0.05..0.5.
+      if (s < 0.05) continue;
+      // Map s ∈ [0.05, 0.5] → viridis t ∈ [0.0, 0.30] (darker band:
+      // dark purple c0 → dark blue c2). This is the "darker viridis"
+      // explicitly requested for the smoke layer.
+      float vT = 0.30 * clamp((s - 0.05) / 0.45, 0.0, 1.0);
+      vec3 color = viridis(vT);
+      // Per-step alpha cap at 0.25 so the smoke never fully saturates
+      // the volume; multiplied by u_smokeOpacity (master 0..1) so the
+      // user can fade the whole layer in/out.
+      float a = clamp(s * 0.5 * u_smokeOpacity, 0.0, 0.25);
+      // Composite UNDER the density pass: this is the new "back"
+      // being added in front of the existing density accumulation.
+      // The standard front-to-back blender with (1.0 - accumAlpha2)
+      // keeps the math correct for the new pass alone; we then
+      // combine the two accumulators below.
+      accumColor2 += (1.0 - accumAlpha2) * color * a;
+      accumAlpha2 += (1.0 - accumAlpha2) * a;
+      if (accumAlpha2 > 0.98) break;
+    }
+    // Combine: density was already written into accumColor/accumAlpha
+    // above. Stack the smoke layer in front using a single front-to-
+    // back composite step (one final mix, not 100+).
+    vec3 finalColor = accumColor + (1.0 - accumAlpha) * accumColor2;
+    float finalAlpha = accumAlpha + (1.0 - accumAlpha) * accumAlpha2;
+    accumColor = finalColor;
+    accumAlpha = finalAlpha;
+  }
   // DEBUG r7-alt: u_debugMode 0 = normal, 2 = red where hit. (debugMode 1
   // used to render solid magenta but that got confused with the cube's
   // -x face in normal scenes; the diagnostic it provided — "is the
@@ -1788,6 +2167,7 @@ function createRenderer(canvas, spec) {
   // Uniform locations.
   const uniforms = {
     u_volume: gl.getUniformLocation(prog, 'u_volume'),
+    u_smoke: gl.getUniformLocation(prog, 'u_smoke'),  // r38
     u_invViewProj: gl.getUniformLocation(prog, 'u_invViewProj'),
     u_cameraPos: gl.getUniformLocation(prog, 'u_cameraPos'),
     u_volumeMin: gl.getUniformLocation(prog, 'u_volumeMin'),
@@ -1799,6 +2179,8 @@ function createRenderer(canvas, spec) {
     u_fieldMode: gl.getUniformLocation(prog, 'u_fieldMode'),
     u_solidOpacity: gl.getUniformLocation(prog, 'u_solidOpacity'),
     u_debugMode: gl.getUniformLocation(prog, 'u_debugMode'),
+    u_smokeEnabled: gl.getUniformLocation(prog, 'u_smokeEnabled'),  // r38
+    u_smokeOpacity: gl.getUniformLocation(prog, 'u_smokeOpacity'),  // r38
   };
 
   // 3D texture for the volume.
@@ -1815,11 +2197,36 @@ function createRenderer(canvas, spec) {
   gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
                 gl.RED, gl.FLOAT, new Float32Array(spec.nx * spec.ny * spec.nz));
 
+  // r38: 3D texture for the smoke (passive scalar) field. Same
+  // dimensions and format as the density texture. Allocated to zero
+  // on creation; re-uploaded every frame from backend.smokeArray.
+  const smokeTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_3D, smokeTex);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
+                gl.RED, gl.FLOAT, new Float32Array(spec.nx * spec.ny * spec.nz));
+
   return {
-    gl, prog, vao, tex, uniforms,
+    gl, prog, vao, tex, smokeTex, uniforms,
     resize(w, h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); },
     uploadVolume(data) {
       gl.bindTexture(gl.TEXTURE_3D, tex);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
+                    gl.RED, gl.FLOAT, data);
+    },
+    // r38: upload the latest smoke field. Called every frame from the
+    // render loop after the backend has stepped. The same R32F format
+    // is used as the density texture so the fragment shader can use
+    // the same `texture(u_smoke, uvw).r` sampling pattern.
+    uploadSmoke(data) {
+      if (!data) return;
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, smokeTex);
       gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, spec.nx, spec.ny, spec.nz, 0,
                     gl.RED, gl.FLOAT, data);
     },
@@ -1831,6 +2238,12 @@ function createRenderer(canvas, spec) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_3D, tex);
       gl.uniform1i(uniforms.u_volume, 0);
+      // r38: bind smoke texture to unit 1, matching the layout in
+      // FRAG_SRC. Skipping the bind when smoke is disabled is fine —
+      // the shader gates the second pass on u_smokeEnabled.
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, smokeTex);
+      gl.uniform1i(uniforms.u_smoke, 1);
       gl.uniformMatrix4fv(uniforms.u_invViewProj, false, state.invViewProj);
       gl.uniform3fv(uniforms.u_cameraPos, state.cameraPos);
       gl.uniform3fv(uniforms.u_volumeMin, state.volumeMin);
@@ -1847,6 +2260,10 @@ function createRenderer(canvas, spec) {
       gl.uniform1i(uniforms.u_fieldMode, state.fieldMode);
       gl.uniform1f(uniforms.u_solidOpacity, state.solidOpacity);
       gl.uniform1i(uniforms.u_debugMode, state.debugMode || 0);
+      // r38: smoke layer uniforms. enabled defaults to 0 so the layer
+      // is OFF until the user toggles it — zero cost when off.
+      gl.uniform1i(uniforms.u_smokeEnabled, state.smokeEnabled ? 1 : 0);
+      gl.uniform1f(uniforms.u_smokeOpacity, state.smokeOpacity != null ? state.smokeOpacity : 0.5);
       gl.clearColor(0.043, 0.051, 0.071, 1.0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND);
@@ -1856,7 +2273,7 @@ function createRenderer(canvas, spec) {
       if (_err) console.log('[windsurf] GL error after drawArrays:', _err);
       gl.disable(gl.BLEND);
     },
-    gl, prog, vao, tex, uniforms,
+    gl, prog, vao, tex, smokeTex, uniforms,
   };
 }
 
@@ -2937,6 +3354,79 @@ function registerTests(tr) {
     tr.assert(solver.solid[iCorner] === 0, 'grid corner must be fluid');
   });
 
+  // -- r38: smoke scalar field --
+  tr.test('smoke_grid_starts_zero', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    let maxSmoke = 0;
+    for (let i = 0; i < solver.grid.n; i++) {
+      if (solver.grid.smoke[i] > maxSmoke) maxSmoke = solver.grid.smoke[i];
+    }
+    tr.assert(maxSmoke === 0, `initial smoke must be 0, got max=${maxSmoke}`);
+  });
+  tr.test('smoke_inlet_set_to_one_each_step', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 5; i++) solver.step();
+    // Inlet (x=0) cells must all be exactly 1 after stepping — the
+    // boundary condition re-injects smoke at every step.
+    let allOne = true, badCount = 0;
+    for (let z = 0; z < config.nz; z++) {
+      for (let y = 0; y < config.ny; y++) {
+        const i = solver.grid.lin(0, y, z);
+        if (solver.grid.smoke[i] !== 1) { allOne = false; badCount++; }
+      }
+    }
+    tr.assert(allOne, `all inlet cells must be 1, ${badCount} are not`);
+  });
+  tr.test('smoke_zero_inside_solid', () => {
+    // 5x5 cube in the middle of a 16x16x16 grid; smoke must be exactly 0
+    // inside the cube and 1 at the inlet (x=0) after a few steps.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 10; i++) solver.step();
+    let solidBad = 0;
+    for (let z = 0; z < config.nz; z++) {
+      for (let y = 0; y < config.ny; y++) {
+        for (let x = 0; x < config.nx; x++) {
+          const i = solver.grid.lin(x, y, z);
+          if (solver.solid[i] && solver.grid.smoke[i] !== 0) solidBad++;
+        }
+      }
+    }
+    tr.assert(solidBad === 0, `solid cells must have smoke=0, ${solidBad} have non-zero`);
+  });
+  tr.test('smoke_decays_with_low_decay', () => {
+    // With decay=0.5 (extreme low), smoke should be much less than 1 in
+    // the wake after 10 steps. We start the smoke at 1 (inlet
+    // injection) and let the upwind stencil carry it forward. A single
+    // cell 5 steps downwind of the inlet should have smoke between 0
+    // and 1 (decay applied) — but NOT 0, because the inlet pushes 1 in
+    // every step.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      smokeDecay: 0.5, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 10; i++) solver.step();
+    const cy = 8, cz = 8;
+    // Cell 5 steps downwind of the inlet.
+    const i = solver.grid.lin(5, cy, cz);
+    const s = solver.grid.smoke[i];
+    tr.assert(s > 0 && s < 1, `downwind smoke should be (0,1), got ${s}`);
+  });
+  tr.test('smoke_propagates_downstream', () => {
+    // After enough steps at u_inf=0.1, smoke from the inlet should have
+    // reached x=8. With no obstacle in the way and u_inf=0.1 ≈ 1 cell
+    // per ~10 steps, 200 steps is enough to transport smoke 20 cells.
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 200; i++) solver.step();
+    const cy = 6, cz = 6;
+    const iFar = solver.grid.lin(8, cy, cz);
+    const sFar = solver.grid.smoke[iFar];
+    tr.assert(sFar > 0, `smoke at x=8 should be > 0 after 200 steps, got ${sFar}`);
+  });
+
   // -- drag.rs --
   tr.test('empty_scene_has_zero_drag', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -3282,6 +3772,7 @@ async function main() {
   let backend;
   try {
     backend = await createComputeBackend(spec, forceCpu);
+    window.__windsurfBackend = backend;
   } catch (e) {
     showError('Failed to create compute backend: ' + e.message);
     return;
@@ -3358,6 +3849,14 @@ async function main() {
   let simStepsPerSecond = 0;
   let lastStatsT = performance.now();
   let dragTimer = 0;
+
+  // r38: smoke layer state. Bound below to the toggle / opacity / decay
+  // controls. Default ON so the user sees the feature the moment they
+  // open the page; smoke opacity defaults to 100% (full strength); the
+  // decay slider's default value of 0.998 is read directly in
+  // applyConfig() so the live decay can change without an init.
+  let smokeEnabled = true;
+  let smokeOpacity = 1.0;
 
   // Streamline tracer — initial 80 streamlines, each carrying a 96-point
   // trail (in burst mode) or a full inlet→outlet path (in permanent
@@ -3467,6 +3966,12 @@ async function main() {
       rho0: 1.0,
       viscosity: parseFloat(viscInput.value),
       obstacles: buildObstacle(),
+      // r38: passive-scalar decay. Multiplied into the smoke field
+      // every LBM step. 0.998 = 1/e decay in ~500 steps. Tunable
+      // via the smoke decay slider (0.95..1.00). The slider may not
+      // be bound yet on the very first applyConfig() call (TDZ):
+      // fallback to its HTML default value (0.998) instead.
+      smokeDecay: parseFloat(document.getElementById('smoke-decay-slider')?.value ?? 0.998),
     };
     // r33: applyConfig runs on slider `change` (release) and was
     // writing the lattice value to uInfVal. Now goes through
@@ -3634,6 +4139,36 @@ async function main() {
     streamOpacityVal.textContent = streamOpacitySlider.value + '%';
     if (window.__windsurfLines) window.__windsurfLines.setStreamAlpha(a);
   });
+  // r38: smoke layer controls. Three independent bindings:
+  //   smokeToggle       — master on/off, gates the entire second
+  //                       ray-march pass in the shader (zero cost when off).
+  //   smokeOpacitySlider — master opacity multiplier (0..1).
+  //   smokeDecaySlider  — per-step multiplicative decay on the smoke
+  //                       field; requires applyConfig() to push the
+  //                       new value into the LBM solver.
+  const smokeToggle = document.getElementById('smoke-toggle');
+  const smokeOpacitySlider = document.getElementById('smoke-opacity-slider');
+  const smokeOpacityVal = document.getElementById('smoke-opacity-val');
+  const smokeDecaySlider = document.getElementById('smoke-decay-slider');
+  const smokeDecayVal = document.getElementById('smoke-decay-val');
+  smokeToggle.addEventListener('change', () => {
+    smokeEnabled = smokeToggle.checked;
+  });
+  smokeOpacitySlider.addEventListener('input', () => {
+    smokeOpacity = parseInt(smokeOpacitySlider.value, 10) / 100;
+    smokeOpacityVal.textContent = smokeOpacitySlider.value + '%';
+  });
+  smokeDecaySlider.addEventListener('input', () => {
+    smokeDecayVal.textContent = parseFloat(smokeDecaySlider.value).toFixed(3);
+    // r38: decay is part of the LBM config; needs applyConfig() so the
+    // new value gets pushed into the solver / GPU params buffer. Cheap
+    // (just zeros the smoke buffer on the WebGPU side, no LBM state to
+    // re-derive).
+    applyConfig();
+  });
+  // r38: live update on smoke-opacity input without re-running applyConfig.
+  // (Only the smoke decay slider triggers applyConfig — opacity is a
+  // pure shader uniform, decay is a solver config field.)
   // Push the initial slider value into the renderer once applyConfig()
   // has wired it up. Done with a one-shot after-init hook.
   // r26: shape + rotation handlers. On any change, rebuild the
@@ -3956,6 +4491,28 @@ async function main() {
           if (backend.densityCpu) renderer.uploadVolume(backend.densityCpu);
         });
       }
+      // r38: smoke upload. CPU path: synchronous via `backend.smoke`
+      // (a Float32Array view of the solver's grid.smoke — no copy, no
+      // readback). WebGPU path: readbackSmoke() updates the CPU mirror
+      // asynchronously; smokeArray returns that mirror.
+      const smokeData = backend.smokeArray;
+      if (smokeData && smokeEnabled) {
+        renderer.uploadSmoke(smokeData);
+      } else if (smokeData && !smokeEnabled) {
+        // r38: when smoke is off, we still want to KEEP the texture
+        // bound (the shader gates the second pass on u_smokeEnabled,
+        // so the value sampled doesn't matter). But to avoid spurious
+        // "weird stale smoke" flashes if the user toggles back on, we
+        // upload the current data anyway. Cost: one texImage3D per
+        // frame, no readback on WebGPU. Fine.
+        renderer.uploadSmoke(smokeData);
+      }
+      // r38: WebGPU readback — kick off async readback of the smoke
+      // buffer every frame. Cheap (~16KB), in parallel with the
+      // density readback. _smokeReadback guards against overlap.
+      if (backend.readbackSmoke && smokeEnabled) {
+        backend.readbackSmoke().catch(() => { /* swallow — readback errors are non-fatal */ });
+      }
       const aspect = canvas.clientWidth / canvas.clientHeight;
       const vp = camera.viewProj(aspect);
       if (showVolumetric) {
@@ -3970,6 +4527,11 @@ async function main() {
           fieldMode: 0,
           solidOpacity: 0.0,
           debugMode,
+          // r38: smoke layer state. `smokeEnabled` is a top-level
+          // boolean owned by the UI module; `smokeOpacity` (0..1) is
+          // the slider value. Both are passed through to the shader.
+          smokeEnabled,
+          smokeOpacity,
         });
       } else {
         // Volumetric off (e.g. ?vol=0) — clear canvas to background ourselves.
