@@ -1721,32 +1721,20 @@ class CpuCompute {
   // doesn't need to branch on backend type.
   get smokeArray() { return this.smoke; }
   _refreshDensity() {
+    // Reads grid.{rho,u} (post-step), copies into this.density and
+    // this.velMag for the volumetric upload. vortMag is written by
+    // LbmSolver._computeVorticity (called inside step()); this.vortMag
+    // aliases that buffer so no work happens here for the vorticity
+    // field. Solid cells get 0 so the colormap doesn't bleed into
+    // obstacles.
     const n = this.solver.grid.n;
     const g = this.solver.grid;
-    const nx = g.nx, ny = g.ny, nz = g.nz;
     const u = g.u;
-    // r42: precompute offset from a cell to its y±1 / z±1 neighbours.
-    // Same for every x in that (y, z) line — cached as 4 Int32Arrays
-    // indexed by (y*nz + z). Saves 4 multiplies per cell.
-    const yPlaneSize = ny * nz;
-    const ymShift = new Int32Array(yPlaneSize);
-    const ypShift = new Int32Array(yPlaneSize);
-    const zmShift = new Int32Array(yPlaneSize);
-    const zpShift = new Int32Array(yPlaneSize);
-    for (let yz = 0; yz < yPlaneSize; yz++) {
-      const y = (yz / nz) | 0;
-      const z = yz % nz;
-      const linY = y * nx + z * nx * ny;
-      ymShift[yz] = (Math.max(y - 1, 0) * nx + z * nx * ny) - linY;
-      ypShift[yz] = (Math.min(y + 1, ny - 1) * nx + z * nx * ny) - linY;
-      zmShift[yz] = (y * nx + Math.max(z - 1, 0) * nx * ny) - linY;
-      zpShift[yz] = (y * nx + Math.min(z + 1, nz - 1) * nx * ny) - linY;
-    }
+    const solid = this.solver.solid;
     for (let i = 0; i < n; i++) {
-      if (this.solver.solid[i]) {
+      if (solid[i]) {
         this.density[i] = 0;
         this.velMag[i] = 0;
-        this.vortMag[i] = 0;
         continue;
       }
       this.density[i] = g.rho[i];
@@ -1754,39 +1742,6 @@ class CpuCompute {
       const uy = u[i * 3 + 1];
       const uz = u[i * 3 + 2];
       this.velMag[i] = Math.sqrt(ux * ux + uy * uy + uz * uz);
-      // r42: vorticity ω = ∇×u via central differences.
-      // i = x + y*nx + z*nx*ny. yz = (i / nx) | 0 (integer div via
-      // OR-0 is ~3x faster than Math.floor on V8). Solid neighbours
-      // hold 0 in u (set by the solid branch of the macroscopic kernel),
-      // so the central differences naturally degrade to one-sided at
-      // solid interfaces — visually fine for the wake / shear-layer
-      // regions where vorticity is high.
-      const yz = (i / nx) | 0;
-      const x = i - (i / nx | 0) * nx;
-      const xm = x > 0 ? -1 : 0;
-      const xp = x < nx - 1 ? 1 : 0;
-      const iYm = i + ymShift[yz];
-      const iYp = i + ypShift[yz];
-      const iZm = i + zmShift[yz];
-      const iZp = i + zpShift[yz];
-      const uyYp = u[iYp * 3 + 1];
-      const uyYm = u[iYm * 3 + 1];
-      const uyZp = u[iZp * 3 + 1];
-      const uyZm = u[iZm * 3 + 1];
-      const uzYp = u[iYp * 3 + 2];
-      const uzYm = u[iYm * 3 + 2];
-      const uxZp = u[iZp * 3 + 0];
-      const uxZm = u[iZm * 3 + 0];
-      const uzXp = u[(i + xp) * 3 + 2];
-      const uzXm = u[(i + xm) * 3 + 2];
-      const uxYp = u[iYp * 3 + 0];
-      const uxYm = u[iYm * 3 + 0];
-      const uyXp = u[(i + xp) * 3 + 1];
-      const uyXm = u[(i + xm) * 3 + 1];
-      const wx = (uzYp - uzYm) * 0.5 - (uyZp - uyZm) * 0.5;
-      const wy = (uxZp - uxZm) * 0.5 - (uzXp - uzXm) * 0.5;
-      const wz = (uyXp - uyXm) * 0.5 - (uxYp - uxYm) * 0.5;
-      this.vortMag[i] = Math.sqrt(wx * wx + wy * wy + wz * wz);
     }
   }
   get solid() { return this.solver.solid; }
