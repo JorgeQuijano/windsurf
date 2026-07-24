@@ -5904,14 +5904,23 @@ async function main() {
     });
   }
   // r46: pathline toggle. Off→on injects a fresh burst; on→off clears
-  // all particles and trails immediately.
+  // all particles and trails immediately. We read the config from
+  // backend.solver (available after applyConfig()) not the local
+  // 'solver' variable, which isn't in this handler's closure scope.
   const pathlineToggle = document.getElementById('pathline-toggle');
   if (pathlineToggle) {
     pathlineToggle.addEventListener('change', () => {
       pathlineEnabled = pathlineToggle.checked;
       if (pathlineBurst) {
-        if (pathlineEnabled) pathlineBurst.inject(solver.config.nx, solver.config.ny, solver.config.nz);
-        else pathlineBurst.clear();
+        if (pathlineEnabled) {
+          const sol = window.__windsurfBackend && window.__windsurfBackend.solver;
+          if (sol) {
+            const cfg = sol.config;
+            pathlineBurst.inject(cfg.nx, cfg.ny, cfg.nz);
+          }
+        } else {
+          pathlineBurst.clear();
+        }
       }
     });
   }
