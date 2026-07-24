@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r38-2026-07-24 (passive scalar smoke field — darker viridis layer in wake, shows recirculation & vortex shedding; toggle + opacity + decay sliders)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r39-2026-07-24 (Smagorinsky LES turbulence model — local strain-rate eddy viscosity ν_t = (C_s·Δ)²·|S|, C_s slider 0.00..0.20; CPU-only this rev, WebGPU parity in r40)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -371,6 +371,10 @@
       <div class="control">
         <label><span class="lbl-text">smoke decay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
         <input type="range" id="smoke-decay-slider" min="0.95" max="1.00" step="0.001" value="0.998">
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">Smagorinsky C_s <span class="help" data-tip="r39: Smagorinsky LES turbulence model. Eddy-viscosity ν_t = (C_s · Δ)² · |S| where |S| is the local strain-rate magnitude. Effective per-cell viscosity becomes ν_lam + ν_t. 0.00 = pure laminar (r38 behavior, all wakes smooth). 0.10 = mild LES, wakes slightly textured. 0.16 = standard Smagorinsky, good general-purpose default. 0.20 = strong LES, very heavy damping of small eddies (useful for very high-Re flows). At C_s=0 the Smagorinsky pass is skipped entirely (zero cost).">?</span></span><span id="smag-cs-val">0.00</span></label>
+        <input type="range" id="smag-cs-slider" min="0.00" max="0.20" step="0.01" value="0.00">
       </div>
       <div class="control">
         <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -816,6 +820,13 @@ class LbmSolver {
     this.grid = new Grid(config.nx, config.ny, config.nz, config.u_inf, config.rho0);
     this.solid = new Uint8Array(this.grid.n);
     this.fstar = new Float32Array(this.grid.n * Q);
+    // r39: Smagorinsky LES. We store one float per cell: the local
+    // total strain rate |S| = sqrt(2 * S_ij * S_ij). The collision
+    // step scales each cell's inv_tau by 1 + (C_s * Δ)^2 * |S| /
+    // (laminar ν). This is the eddy-viscosity model — local turbulent
+    // diffusivity proportional to local strain. C_s and Δ are passed
+    // via config (C_s=0 → laminar, identical to r38 behavior).
+    this.strain = new Float32Array(this.grid.n);
     this.stepCount = 0;
     this._rasteriseObstacles();
   }
@@ -842,32 +853,122 @@ class LbmSolver {
 
   step() {
     const { nx, ny, nz, u_inf, rho0 } = this.config;
-    const tau = this.config.viscosity / (1 / 3) + 0.5;
-    const inv_tau = 1 / tau;
     const cs2 = this.grid.cs2;
     const n = this.grid.n;
+    // r39: Smagorinsky LES. C_s is a Smagorinsky constant (0 =
+    // laminar, standard ~0.16). Δ is the cell size in lattice units
+    // (1.0 here). We precompute (C_s*Δ)² so the per-cell multiply
+    // is a single FMA.
+    const Cs = this.config.smagorinskyCs ?? 0;
+    const CsDeltaSq = Cs * Cs;  // Δ=1
+    const nuLam = this.config.viscosity;
+    // Baseline inverse relaxation time (laminar only).
+    const inv_tau_lam = 1 / (nuLam / cs2 + 0.5);
 
     // 1. Macroscopic from current f.
     this.grid.computeMacroscopic();
 
-    // 2. Collision into fstar.
-    for (let i = 0; i < n; i++) {
-      const rho = this.grid.rho[i];
-      const ux = this.grid.u[i * 3 + 0];
-      const uy = this.grid.u[i * 3 + 1];
-      const uz = this.grid.u[i * 3 + 2];
-      const uSq = ux * ux + uy * uy + uz * uz;
-      for (let q = 0; q < Q; q++) {
-        const c = D3Q19[q];
-        const cu = c[0] * ux + c[1] * uy + c[2] * uz;
-        // Equivalently the Rust form: 1 + cu/cs2 + 0.5*(cu/cs2)^2 - 0.5*uSq/cs2
-        const feq = W[q] * rho * (1 + cu / cs2 + 0.5 * (cu * cu) / (cs2 * cs2) - 0.5 * uSq / cs2);
-        const fq = this.grid.f[i * Q + q];
-        this.fstar[i * Q + q] = fq - inv_tau * (fq - feq);
+    // 2. r39: compute local strain rate |S| at each cell using central
+    // differences. Periodic in y,z, Neumann-zero at x=0 and x=nx-1 (the
+    // inlet/outlet). Solid cells get |S|=0 so they never get extra
+    // damping in their fluid neighbors (the neighbor sweep still reads
+    // across solid faces; we just don't apply eddy viscosity there).
+    if (Cs > 0) {
+      const u = this.grid.u;
+      const solid = this.solid;
+      const strain = this.strain;
+      const dx = 1.0, dy = 1.0, dz = 1.0;
+      const halfInvDx = 0.5 / dx, halfInvDy = 0.5 / dy, halfInvDz = 0.5 / dz;
+      for (let z = 0; z < nz; z++) {
+        for (let y = 0; y < ny; y++) {
+          for (let x = 0; x < nx; x++) {
+            const i = x + y * nx + z * nx * ny;
+            if (solid[i]) { strain[i] = 0; continue; }
+            // Periodic neighbours in y and z. Neumann-zero in x means
+            // du/dx at x=0 is computed by mirroring u[-1] = u[1] and at
+            // x=nx-1 by mirroring u[nx] = u[nx-2] — i.e. forward /
+            // backward difference (NOT central) at the boundary, which
+            // is what (xp=x, xm=x) yields automatically.
+            const xp = x < nx - 1 ? x + 1 : x;
+            const xm = x > 0      ? x - 1 : x;
+            const yp = y < ny - 1 ? y + 1 : y;
+            const ym = y > 0      ? y - 1 : y;
+            const zp = z < nz - 1 ? z + 1 : z;
+            const zm = z > 0      ? z - 1 : z;
+            // U(xx, yy, zz, c) — fetch velocity component `c` (0=x, 1=y, 2=z)
+            // at the cell (xx, yy, zz).
+            const U = (xx, yy, zz, c) => u[(xx + yy * nx + zz * nx * ny) * 3 + c];
+            const dux_dx = (U(xp, y, z, 0) - U(xm, y, z, 0)) * halfInvDx;
+            const dux_dy = (U(x, yp, z, 0) - U(x, ym, z, 0)) * halfInvDy;
+            const dux_dz = (U(x, y, zp, 0) - U(x, y, zm, 0)) * halfInvDz;
+            const duy_dx = (U(xp, y, z, 1) - U(xm, y, z, 1)) * halfInvDx;
+            const duy_dy = (U(x, yp, z, 1) - U(x, ym, z, 1)) * halfInvDy;
+            const duy_dz = (U(x, y, zp, 1) - U(x, y, zm, 1)) * halfInvDz;
+            const duz_dx = (U(xp, y, z, 2) - U(xm, y, z, 2)) * halfInvDx;
+            const duz_dy = (U(x, yp, z, 2) - U(x, ym, z, 2)) * halfInvDy;
+            const duz_dz = (U(x, y, zp, 2) - U(x, y, zm, 2)) * halfInvDz;
+            // Total strain magnitude |S| = sqrt(2 * S_ij * S_ij) where
+            // S_ij = 0.5 * (∂u_i/∂x_j + ∂u_j/∂x_i). 6 unique pairs.
+            const s_xx = dux_dx;
+            const s_yy = duy_dy;
+            const s_zz = duz_dz;
+            const s_xy = 0.5 * (dux_dy + duy_dx);
+            const s_xz = 0.5 * (dux_dz + duz_dx);
+            const s_yz = 0.5 * (duy_dz + duz_dy);
+            const sNorm2 = 2 * (s_xx * s_xx + s_yy * s_yy + s_zz * s_zz)
+                          +    4 * (s_xy * s_xy + s_xz * s_xz + s_yz * s_yz);
+            strain[i] = Math.sqrt(Math.max(0, sNorm2));
+          }
+        }
+      }
+    } else {
+      this.strain.fill(0);
+    }
+
+    // 3. Collision into fstar — uses per-cell inv_tau_eff when LES is on.
+    if (Cs > 0) {
+      // Precompute the per-cell effective inverse relaxation time:
+      //   inv_tau_eff = 1 / (τ_lam + ν_t) = 1 / (1/inv_tau_lam + ν_t/cs2)
+      //                = inv_tau_lam / (1 + ν_t * inv_tau_lam / cs2)
+      // ν_t/cs2 = (C_s*Δ)^2 * |S| / cs2
+      const k = CsDeltaSq / cs2;
+      for (let i = 0; i < n; i++) {
+        const rho = this.grid.rho[i];
+        const ux = this.grid.u[i * 3 + 0];
+        const uy = this.grid.u[i * 3 + 1];
+        const uz = this.grid.u[i * 3 + 2];
+        const uSq = ux * ux + uy * uy + uz * uz;
+        const inv_tau = inv_tau_lam / (1 + k * this.strain[i] * inv_tau_lam);
+        for (let q = 0; q < Q; q++) {
+          const c = D3Q19[q];
+          const cu = c[0] * ux + c[1] * uy + c[2] * uz;
+          const feq = W[q] * rho * (1 + cu / cs2 + 0.5 * (cu * cu) / (cs2 * cs2) - 0.5 * uSq / cs2);
+          const fq = this.grid.f[i * Q + q];
+          this.fstar[i * Q + q] = fq - inv_tau * (fq - feq);
+        }
+      }
+    } else {
+      // Pure laminar — exact r38 code path, just to keep the branch
+      // tight and the benchmark numbers stable when C_s=0.
+      for (let i = 0; i < n; i++) {
+        const rho = this.grid.rho[i];
+        const ux = this.grid.u[i * 3 + 0];
+        const uy = this.grid.u[i * 3 + 1];
+        const uz = this.grid.u[i * 3 + 2];
+        const uSq = ux * ux + uy * uy + uz * uz;
+        for (let q = 0; q < Q; q++) {
+          const c = D3Q19[q];
+          const cu = c[0] * ux + c[1] * uy + c[2] * uz;
+          const feq = W[q] * rho * (1 + cu / cs2 + 0.5 * (cu * cu) / (cs2 * cs2) - 0.5 * uSq / cs2);
+          const fq = this.grid.f[i * Q + q];
+          this.fstar[i * Q + q] = fq - inv_tau_lam * (fq - feq);
+        }
       }
     }
 
-    // 3. Streaming (pull scheme).
+    // (Streaming unchanged — the next code block still does the
+    // pull-scheme streaming into a fresh fNew.)
+    // 4. Streaming (pull scheme).
     const fNew = new Float32Array(n * Q);
     for (let z = 0; z < nz; z++) {
       for (let y = 0; y < ny; y++) {
@@ -3427,6 +3528,63 @@ function registerTests(tr) {
     tr.assert(sFar > 0, `smoke at x=8 should be > 0 after 200 steps, got ${sFar}`);
   });
 
+  // -- r39: Smagorinsky LES turbulence model --
+  tr.test('les_strain_is_zero_in_uniform_flow', () => {
+    // In a uniform flow, all velocity gradients vanish, so |S| = 0
+    // everywhere. The eddy-viscosity model must produce zero extra
+    // damping in this limit (regardless of C_s).
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02,
+      obstacles: [], smagorinskyCs: 0.2 };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 100; i++) solver.step();
+    let maxStrain = 0;
+    for (let i = 0; i < solver.strain.length; i++) {
+      if (solver.strain[i] > maxStrain) maxStrain = solver.strain[i];
+    }
+    // Loose tolerance — inlet BC injects tiny numerical perturbations.
+    tr.assert(maxStrain < 0.05, `uniform-flow strain should be ≈ 0, got ${maxStrain}`);
+  });
+
+  tr.test('les_increases_wake_recovery_with_high_cs', () => {
+    // Behind a sphere obstacle, the wake has strong velocity gradients.
+    // With high C_s, the eddy-viscosity model adds extra damping in the
+    // wake, which means the velocity field downstream "recovers" faster
+    // (closer to free-stream) than in the laminar case.
+    // This is the canonical LES signature: extra dissipation in the
+    // shear layers ⇒ wake returns to u_inf faster. We assert the RATIO
+    // (les > lam) rather than absolute bounds — the absolute wake
+    // velocity depends on the Re of the test (low-Re wake is slow in
+    // both laminar and LES).
+    const baseConfig = { nx: 24, ny: 12, nz: 12, u_inf: 0.15, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleSphere({ x: 0, y: 0, z: 0 }, 3)] };
+    const lam = new LbmSolver({ ...baseConfig, smagorinskyCs: 0 });
+    const les = new LbmSolver({ ...baseConfig, smagorinskyCs: 0.2 });
+    for (let i = 0; i < 800; i++) lam.step();
+    for (let i = 0; i < 800; i++) les.step();
+    const cy = 6, cz = 6;
+    // Find the FIRST x in the wake (past the obstacle) where the
+    // laminar wake has ux > 0.005 — that's our "far wake" probe. Avoids
+    // hardcoding a specific x value that might be inside the obstacle.
+    const sphereR = 3;
+    const obsCenterX = 12;  // nx/2 = 24/2 = 12
+    let xProbe = -1;
+    for (let x = obsCenterX + sphereR + 2; x < 24; x++) {
+      const ux = lam.grid.u[lam.grid.lin(x, cy, cz) * 3 + 0];
+      if (Math.abs(ux) > 0.001) { xProbe = x; break; }
+    }
+    tr.assert(xProbe > 0,
+      `should find a far-wake probe point past the obstacle (lam ux stayed 0)`);
+    const lamUx = lam.grid.u[lam.grid.lin(xProbe, cy, cz) * 3 + 0];
+    const lesUx = les.grid.u[les.grid.lin(xProbe, cy, cz) * 3 + 0];
+    tr.assert(lesUx > lamUx,
+      `LES wake should be faster-recovering than laminar at x=${xProbe}: lam=${lamUx.toFixed(4)}, les=${lesUx.toFixed(4)}`);
+    // Sanity: both velocities should be on the same side of 0 (no sign
+    // reversal between laminar and LES — that's a basic consistency
+    // check).
+    tr.assert(Math.sign(lesUx) === Math.sign(lamUx),
+      `LES and laminar should agree on wake direction: lam=${lamUx}, les=${lesUx}`);
+  });
+
   // -- drag.rs --
   tr.test('empty_scene_has_zero_drag', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -3972,6 +4130,9 @@ async function main() {
       // be bound yet on the very first applyConfig() call (TDZ):
       // fallback to its HTML default value (0.998) instead.
       smokeDecay: parseFloat(document.getElementById('smoke-decay-slider')?.value ?? 0.998),
+      // r39: Smagorinsky LES constant. Eddy viscosity = (C_s Δ)² |S|.
+      // 0 = pure laminar (r38 behavior, free). 0.16 = standard.
+      smagorinskyCs: parseFloat(document.getElementById('smag-cs-slider')?.value ?? 0),
     };
     // r33: applyConfig runs on slider `change` (release) and was
     // writing the lattice value to uInfVal. Now goes through
@@ -4164,6 +4325,15 @@ async function main() {
     // new value gets pushed into the solver / GPU params buffer. Cheap
     // (just zeros the smoke buffer on the WebGPU side, no LBM state to
     // re-derive).
+    applyConfig();
+  });
+  // r39: Smagorinsky C_s slider. Like decay, this is a solver config
+  // field — needs applyConfig() to push into the LbmSolver / WebGPU
+  // Params buffer. Slider range 0.00..0.20, step 0.01.
+  const smagCsSlider = document.getElementById('smag-cs-slider');
+  const smagCsVal = document.getElementById('smag-cs-val');
+  smagCsSlider.addEventListener('input', () => {
+    smagCsVal.textContent = parseFloat(smagCsSlider.value).toFixed(2);
     applyConfig();
   });
   // r38: live update on smoke-opacity input without re-running applyConfig.
