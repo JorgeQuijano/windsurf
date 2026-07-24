@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r42-2026-07-24 (vorticity colormap: select 'vorticity magnitude |∇×u|' from the colormap field dropdown to highlight shear layers and vortex shedding in the wake. Vorticity is computed every step on both CPU and WebGPU backends. Field modes: density (default) | velocity magnitude | vorticity magnitude | pressure (signed). All fields are always computed; only the colormap mapping changes.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r43-2026-07-24 (pressure colormap: select 'pressure (signed)' from the colormap field dropdown to visualise the stagnation point on the upstream face (red) and the wake suction behind the cube (blue). Pressure p = cs²·(ρ - ρ₀) with cs² = 1/3 is computed every step on both CPU and WebGPU backends. Field modes: density | velocity | vorticity | pressure (signed). All fields are always computed; only the colormap mapping changes.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -858,6 +858,13 @@ class LbmSolver {
     // solver.vortMag; CpuCompute aliases it (this.vortMag = solver.vortMag)
     // so the render loop pulls the same buffer either way.
     this.vortMag = new Float32Array(this.grid.n);
+    // r43: per-cell pressure p = cs²·(ρ - ρ₀) with cs² = 1/3 (D3Q19
+    // lattice). Signed scalar; rendered with a red-blue diverging
+    // colormap. Like vortMag, the canonical allocation lives here so
+    // selftests can reach it via solver.pressure; CpuCompute aliases
+    // it (this.pressure = solver.pressure) so the render loop pulls
+    // the same buffer either way.
+    this.pressure = new Float32Array(this.grid.n);
     this.stepCount = 0;
     this._rasteriseObstacles();
   }
@@ -1040,6 +1047,7 @@ class LbmSolver {
     // directly (new LbmSolver(config); for (...) solver.step()) get the
     // field populated too. CpuCompute aliases solver.vortMag.
     this._computeVorticity();
+    this._computePressure();
     this.stepCount++;
   }
 
@@ -1148,6 +1156,27 @@ class LbmSolver {
           vortMag[i] = Math.sqrt(wx * wx + wy * wy + wz * wz);
         }
       }
+    }
+  }
+
+  // r43: per-cell pressure p = cs²·(ρ - ρ₀) with cs² = 1/3 (D3Q19
+  // lattice speed of sound squared). Signed scalar — positive on the
+  // upstream face (stagnation, high pressure), negative in the wake
+  // (low pressure / Bernoulli suction). Rendered with a red-blue
+  // diverging colormap so the user can read sign at a glance.
+  // Solid cells: 0 (obstacles have no fluid pressure). Bulk cells
+  // (ρ ≈ ρ₀ = 1): |p| ≈ 0. Cube's pressure buildup peaks at |p| ~
+  // 0.05 (ρ ~ 1.15) at low u_inf.
+  _computePressure() {
+    const { nx, ny, nz } = this.config;
+    const CS2 = 1 / 3;
+    const RHO0 = 1;
+    const rho = this.grid.rho;
+    const solid = this.solid;
+    const pressure = this.pressure;
+    const n = this.grid.n;
+    for (let i = 0; i < n; i++) {
+      pressure[i] = solid[i] ? 0 : CS2 * (rho[i] - RHO0);
     }
   }
 
@@ -1686,6 +1715,9 @@ class CpuCompute {
     // (solver.vortMag) and aliased here in reset(); the render loop
     // pulls backend.vortMag = this.vortMag = solver.vortMag.
     this.vortMag = null;
+    // r43: pressure p = cs²·(ρ - ρ₀). Same aliasing pattern — the
+    // canonical allocation lives on LbmSolver (solver.pressure).
+    this.pressure = null;
   }
   reset(config) {
     this.config = config;
@@ -1693,6 +1725,8 @@ class CpuCompute {
     // r42: alias the solver's vortMag so the render loop can pull
     // backend.vortMag without a per-frame copy.
     this.vortMag = this.solver.vortMag;
+    // r43: alias pressure from solver.
+    this.pressure = this.solver.pressure;
     this._refreshDensity();
   }
   // r41: live config update (no full reset). Only used for r41's
@@ -1844,6 +1878,11 @@ const OPPOSITE = array<u32, 19>(
 // neighbors from the surrounding 6-cell stencil. Clamped at the domain
 // boundary (clamped neighbor indices) to avoid OOB reads.
 @group(0) @binding(9) var<storage, read_write> vort_mag_buf: array<f32>;
+// r43: per-cell pressure p = cs²·(ρ - ρ₀) with cs² = 1/3, ρ₀ = 1.0.
+// Signed scalar (positive = stagnation, negative = wake suction).
+// Solid cells: 0. The macroscopic kernel writes it after computing
+// rho in this same dispatch.
+@group(0) @binding(10) var<storage, read_write> pressure_buf: array<f32>;
 
 @compute @workgroup_size(8, 4, 2)
 fn collision(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -2010,6 +2049,11 @@ fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
   let wy = (uxZp - uxZm) * 0.5 - (uzXp - uzXm) * 0.5;
   let wz = (uyXp - uyXm) * 0.5 - (uxYp - uxYm) * 0.5;
   vort_mag_buf[cell] = sqrt(wx * wx + wy * wy + wz * wz);
+  // r43: pressure from this cell's freshly-computed density. Solid
+  // cells have rho=0 (set earlier in the kernel), so p = -1/3
+  // (purely cosmetic — the render path overwrites with 0 for
+  // cells where solid[cell] = 1).
+  pressure_buf[cell] = select(0.0, (rho - 1.0) * 0.33333334, solid == 0u);
 }
 
 // r38: passive scalar (smoke) advection kernel. One cell per
@@ -2095,6 +2139,9 @@ class WebGPUCompute {
     // r42: CPU-side mirror of the vorticity magnitude storage buffer.
     // Updated by readback() alongside density and velMag.
     this.vortMagCpu = new Float32Array(this.n);
+    // r43: CPU-side mirror of the pressure storage buffer. Updated
+    // by readback() alongside density/velMag/vortMag.
+    this.pressureCpu = new Float32Array(this.n);
     this.stepCount = 0;
     this.config = null;
     // r38: scalar advection uses ping-pong buffers (smokeA → smokeB).
@@ -2162,6 +2209,10 @@ class WebGPUCompute {
     this.vortMagBuf = this.device.createBuffer({
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
+    // r43: pressure storage buffer, written by the macroscopic kernel.
+    this.pressureBuf = this.device.createBuffer({
+      size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
     // r38: per-cell velocity components for the scalar advection kernel.
     this.uBuf = this.device.createBuffer({
       size: n * 3 * 4, usage: GPUBufferUsage.STORAGE,
@@ -2202,6 +2253,8 @@ class WebGPUCompute {
         { binding: 8, resource: { buffer: outBuf } },
         // r42: vorticity magnitude buffer (written by macroscopic kernel).
         { binding: 9, resource: { buffer: this.vortMagBuf } },
+        // r43: pressure buffer (written by macroscopic kernel).
+        { binding: 10, resource: { buffer: this.pressureBuf } },
       ],
     });
   }
@@ -2445,6 +2498,17 @@ class WebGPUCompute {
     this.vortMagCpu.set(new Float32Array(tmp3.getMappedRange().slice(0)));
     tmp3.unmap();
     tmp3.destroy();
+    // r43: readback pressure storage buffer.
+    const tmp4 = this.device.createBuffer({
+      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const cmd4 = this.device.createCommandEncoder();
+    cmd4.copyBufferToBuffer(this.pressureBuf, 0, tmp4, 0, this.n * 4);
+    this.device.queue.submit([cmd4.finish()]);
+    await tmp4.mapAsync(GPUMapMode.READ);
+    this.pressureCpu.set(new Float32Array(tmp4.getMappedRange().slice(0)));
+    tmp4.unmap();
+    tmp4.destroy();
   }
 
   // Drag: copy f+u to CPU then run JS drag. Heavyweight; we run async every
@@ -2464,6 +2528,8 @@ class WebGPUCompute {
   get velMag() { return this.velMagCpu; }
   // r42: vorticity magnitude mirror exposed to the renderer.
   get vortMag() { return this.vortMagCpu; }
+  // r43: pressure mirror exposed to the renderer.
+  get pressure() { return this.pressureCpu; }
   get solid() { return this.solidCpu; }
 }
 
@@ -2513,6 +2579,31 @@ vec3 viridis(float t) {
   float s = t * 5.0;
   int i = int(floor(s));
   float f = s - float(i);
+  vec3 a, b;
+  if (i == 0) { a = c0; b = c1; }
+  else if (i == 1) { a = c1; b = c2; }
+  else if (i == 2) { a = c2; b = c3; }
+  else if (i == 3) { a = c3; b = c4; }
+  else if (i == 4) { a = c4; b = c5; }
+  else { a = c5; b = c5; }
+  return mix(a, b, f);
+}
+
+// r43: red-blue diverging colormap for signed scalars (pressure).
+// t ∈ [-1, 1] where -1 = deep blue (low pressure), 0 = white, +1 = red.
+// 6-stop piecewise linear: deep blue → blue → white → light red → red.
+vec3 rdbu(float t) {
+  t = clamp(t, -1.0, 1.0);
+  vec3 c0 = vec3(0.020, 0.188, 0.380);  // deep blue (-1.0)
+  vec3 c1 = vec3(0.129, 0.400, 0.674);  // blue (-0.6)
+  vec3 c2 = vec3(0.557, 0.745, 0.847);  // pale blue (-0.2)
+  vec3 c3 = vec3(0.957, 0.957, 0.957);  // white (0.0)
+  vec3 c4 = vec3(0.992, 0.682, 0.580);  // light red (+0.4)
+  vec3 c5 = vec3(0.700, 0.050, 0.150);  // deep red (+1.0)
+  // Map t ∈ [-1, 1] to [0, 1] over 5 segments (0..0.2, 0.2..0.4, ...).
+  float u = (t + 1.0) * 0.5;
+  float f = fract(u * 5.0);
+  int i = int(u * 5.0);
   vec3 a, b;
   if (i == 0) { a = c0; b = c1; }
   else if (i == 1) { a = c1; b = c2; }
@@ -2604,15 +2695,29 @@ void main() {
       d = val * u_densityScale * 30.0;
       thr = 0.05;            // r42: lowered from 0.10 so even mid-wake cells (|ω| ~ 0.01) contribute.
     } else if (u_fieldMode == 3) {
-      // r42: pressure. Signed scalar re-encoded as |val| in the loader
-      // (range-mapping into [0, 1] for R32F upload); see renderer
-      // uploadVolume().
-      d = val * u_densityScale * 80.0;
+      // r43: signed pressure p = cs²·(ρ - ρ₀). The buffer holds the
+      // signed value; we use |val| for the alpha test (|p| near 0
+      // means no buildup) and the sign for the diverging colormap
+      // (red = high pressure / stagnation on the upstream face,
+      // blue = low pressure / wake suction behind the cube).
+      d = abs(val) * u_densityScale * 80.0;
       thr = 0.02;            // r42: lowered from 0.05 so even mild pressure regions show as a tint.
+      // Override vT — we'll use a sign-encoded diverging map below.
+      vTMin = -1.0;
+      vTRange = 2.0;
     }
     if (d < thr) continue;
     float vT = vTMin + vTRange * clamp((d - thr) / (1.0 - thr), 0.0, 1.0);
-    vec3 color = viridis(vT);
+    vec3 color;
+    if (u_fieldMode == 3) {
+      // r43: pressure is signed. Reconstruct the sign from val (the
+      // signed pressure, not |val|). vT was already remapped to
+      // [-1, 1] above so we can use the diverging red-blue map.
+      vT = (val >= 0.0) ? vT : -vT;
+      color = rdbu(vT);
+    } else {
+      color = viridis(vT);
+    }
     // r17: clamp alpha to 0.35 max per fragment so even dense pressure
     // buildup doesn't fully saturate the volume. Prevents the faded-purple
     // accumulation that came from 128 marching steps of low-alpha writes.
@@ -4050,6 +4155,84 @@ function registerTests(tr) {
     }
   });
 
+  // -- r43: pressure field p = cs²·(ρ - ρ₀) --
+  // 1. The pressure field must be allocated at solver creation and
+  //    writeable after step().
+  tr.test('r43_pressure_allocated_and_written', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    tr.assert(solver.pressure && solver.pressure.length === solver.grid.n, 'pressure buffer allocated with length n');
+    // Write a value, step, and verify it got overwritten (not stuck at the test write).
+    solver.pressure[123] = 0.42;
+    for (let i = 0; i < 5; i++) solver.step();
+    // With uniform flow the pressure is essentially 0 everywhere,
+    // so the test write at 123 should be overwritten to ~0.
+    tr.assert(Math.abs(solver.pressure[123]) < 0.01, `pressure[123] after step() = ${solver.pressure[123]} (should be ~0)`);
+  });
+  // 2. In uniform flow with no obstacles, pressure should be exactly
+  //    0 (rho=rho0=1 everywhere, so p = cs²·(1-1) = 0). After the
+  //    first few steps, the inlet has settled and bulk is uniform.
+  tr.test('r43_pressure_zero_for_uniform_flow', () => {
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 100; i++) solver.step();
+    let maxP = 0;
+    for (let i = 0; i < solver.grid.n; i++) {
+      if (Math.abs(solver.pressure[i]) > maxP) maxP = Math.abs(solver.pressure[i]);
+    }
+    // Bulk flow has tiny pressure oscillations from the inlet. With
+    // cs² = 1/3 and ρ perturbations ~ 1e-3 in the bulk, p should be
+    // well under 1e-3.
+    tr.assert(maxP < 1e-3, `max |pressure| in uniform flow = ${maxP}`);
+  });
+  // 3. With a cube obstacle, the upstream face has measurably
+  //    higher pressure than the bulk flow (Bernoulli stagnation
+  //    effect). The wake suction is harder to test in a small
+  //    (24x12x12) grid because the wake hasn't fully developed
+  //    after 500 steps; we focus on the more robust stagnation
+  //    signal which is present from step ~100 onward.
+  tr.test('r43_pressure_nonzero_in_stagnation', () => {
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.08, rho0: 1.0, viscosity: 0.03,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 500; i++) solver.step();
+    // Cube occupies (cx-2..cx+2, cy-2..cy+2, cz-2..cz+2) = (10..14, 4..8, 4..8).
+    // Stagnation cell: 1 lattice unit in front of the cube's upstream face.
+    const cx = 12, cy = 6, cz = 6;
+    // Cube at x=11..13, so x=10 is one cell upstream (stagnation point).
+    const iStag = solver.grid.lin(cx - 3, cy, cz);
+    // Cube at y=4..8, so y=2 is well outside (no obstacle effect).
+    const iSide = solver.grid.lin(cx, cy - 4, cz);
+    // Sanity: stagnation cell must be a fluid cell, not a solid.
+    tr.assert(!solver.solid[iStag], `expected iStag at (${cx-2},${cy},${cz}) to be a fluid cell`);
+    tr.assert(!solver.solid[iSide], `expected iSide at (${cx},${cy-4},${cz}) to be a fluid cell`);
+    // Stagnation pressure should be measurably higher than side pressure.
+    const pStag = solver.pressure[iStag];
+    const pSide = solver.pressure[iSide];
+    tr.assert(pStag > pSide + 0.0005,
+      `stagnation pressure (${pStag}) should exceed side pressure (${pSide}) by > 0.0005`);
+    // Sanity: |p| at stagnation should be > 0.0005 (we have some buildup).
+    tr.assert(pStag > 0.0005, `stagnation pressure = ${pStag} (should be > 0.0005)`);
+  });
+  // 4. Pressure inside solid cells must be exactly 0 (no fluid → no
+  //    pressure).
+  tr.test('r43_pressure_zero_inside_solid', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 50; i++) solver.step();
+    for (let z = -2; z <= 2; z++) {
+      for (let y = -2; y <= 2; y++) {
+        for (let x = -2; x <= 2; x++) {
+          const i = solver.grid.lin(x + 8, y + 8, z + 8);
+          if (solver.solid[i]) {
+            tr.assert(solver.pressure[i] === 0, `solid cell at (${x},${y},${z}) has pressure = ${solver.pressure[i]}`);
+          }
+        }
+      }
+    }
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -5318,6 +5501,12 @@ async function main() {
       const volumeData = (() => {
         if (fieldMode === 1) return backend.velMag;
         if (fieldMode === 2) return backend.vortMag;
+        // r43: signed pressure p = cs²·(ρ - ρ₀). The shader's mode-3
+        // branch uses |val| for the alpha calculation (the colormap
+        // is the diverging red-blue for signed values), so uploading
+        // |p| or p is equivalent for the threshold logic. We upload
+        // the signed buffer and let the shader read |val|.
+        if (fieldMode === 3) return backend.pressure;
         return backend.density;
       })();
       // CPU path: synchronous density. WebGPU: readback once in a while.
