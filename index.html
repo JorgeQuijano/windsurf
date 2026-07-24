@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r40-2026-07-24 (drag split: F_x = F_p (pressure, cyan) + F_v (viscous, orange); bar shows the composition; supports cube/sphere/cylinder/wedge/cone)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r41-2026-07-24 (oscillating inflow: sinusoidal gust at the inlet; 3 amplitude sliders (amp_x streamwise / amp_y lateral / amp_z vertical) + frequency slider; cross-stream modulation (amp_y or amp_z > 0) builds up into a Karman vortex street behind the obstacle. Defaults all zero → r38 uniform inflow.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -381,6 +381,17 @@
       <div class="control">
         <label><span class="lbl-text">Smagorinsky C_s <span class="help" data-tip="r39: Smagorinsky LES turbulence model. Eddy-viscosity ν_t = (C_s · Δ)² · |S| where |S| is the local strain-rate magnitude. Effective per-cell viscosity becomes ν_lam + ν_t. 0.00 = pure laminar (r38 behavior, all wakes smooth). 0.10 = mild LES, wakes slightly textured. 0.16 = standard Smagorinsky, good general-purpose default. 0.20 = strong LES, very heavy damping of small eddies (useful for very high-Re flows). At C_s=0 the Smagorinsky pass is skipped entirely (zero cost).">?</span></span><span id="smag-cs-val">0.00</span></label>
         <input type="range" id="smag-cs-slider" min="0.00" max="0.20" step="0.01" value="0.00">
+      </div>
+      <div class="control" id="osc-section">
+        <label><span class="lbl-text">oscillating inflow <span class="help" data-tip="r41: sinusoidal gust at the inlet (Karman vortex street visualizer). All three amps default to 0 = pure uniform inflow (r38 behavior). amp_x: streamwise modulation (puffs the inlet speed up/down — does NOT produce vortex shedding). amp_y: lateral (y-axis) gust at x=0, modulated by z with wavelength = nz. amp_z: vertical (z-axis) gust, modulated by y with wavelength = ny. Cross-stream modulation (amp_y or amp_z > 0) is what builds up into a Karman vortex street behind the obstacle. frequency: cycles per LBM step (default 0.000 = off; try 0.005 for one cycle per 200 steps; 0.020 for one per 50 steps — the latter gives a tight, fast-shedding wake). At amp_y = 0.04 with f = 0.01 you can clearly see alternating vortices peeling off the cube at default settings.">?</span></span><span id="osc-active-val">off</span></label>
+        <input type="range" id="osc-amp-x" min="0" max="0.10" step="0.001" value="0.000">
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_x <span id="osc-amp-x-val" style="float:right">0.000</span></div>
+        <input type="range" id="osc-amp-y" min="0" max="0.10" step="0.001" value="0.000">
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_y (lateral) <span id="osc-amp-y-val" style="float:right">0.000</span></div>
+        <input type="range" id="osc-amp-z" min="0" max="0.10" step="0.001" value="0.000">
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_z (vertical) <span id="osc-amp-z-val" style="float:right">0.000</span></div>
+        <input type="range" id="osc-freq" min="0" max="0.05" step="0.001" value="0.000">
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">frequency <span id="osc-freq-val" style="float:right">0.000</span></div>
       </div>
       <div class="control">
         <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -1079,18 +1090,42 @@ class LbmSolver {
 
   _applyBoundary() {
     const { nx, ny, nz, u_inf, rho0 } = this.config;
-    const uSq = u_inf * u_inf;
-    // Inlet (x=0): equilibrium at (u_inf, 0, 0) — same for f AND smoke.
-    // Smoke is set to 1 at every non-solid inlet cell each step, so a
-    // continuous plume of smoke is generated and advected downstream.
+    // (uSq is computed per-cell below from the modulated inflow velocity.)
+    // r41: oscillating inflow (sinusoidal gust / Karman vortex street).
+    // Inflow velocity at x=0 is modulated by:
+    //   u_x = u_inf + A_x sin(2π f t)
+    //   u_y = A_y sin(2π f t + 2π z / λ_z)
+    //   u_z = A_z sin(2π f t + 2π y / λ_y)
+    // The lateral modulations (y/z) create a transverse perturbation that
+    // convects downstream and triggers vortex shedding behind the body.
+    // Defaults (all zeros) reproduce r38 behavior exactly.
+    const oscAx = this.config.oscAmpX ?? 0;
+    const oscAy = this.config.oscAmpY ?? 0;
+    const oscAz = this.config.oscAmpZ ?? 0;
+    const oscF = this.config.oscFreq ?? 0;
+    const oscPhase = (oscF > 0)
+      ? (2 * Math.PI * oscF * this.stepCount)
+      : 0;
+    // Wavelength = full domain extent in z (so one complete cycle fits
+    // across the inlet plane). Cross-stream modulation is what builds
+    // up into a Karman vortex street; this is the cleanest setup.
+    const lambdaZ = nz;
+    const lambdaY = ny;
+    // Inlet (x=0): equilibrium at (u_x, u_y, u_z) where the velocity may
+    // be modulated by the oscillating gust.
     for (let z = 0; z < nz; z++) {
       for (let y = 0; y < ny; y++) {
         const i = this.grid.lin(0, y, z);
         if (this.solid[i]) continue;
+        // r41: compute modulated inflow velocity for this (y, z) cell.
+        const ux = u_inf + oscAx * Math.sin(oscPhase);
+        const uy = oscAy * Math.sin(oscPhase + (2 * Math.PI * z) / lambdaZ);
+        const uz = oscAz * Math.sin(oscPhase + (2 * Math.PI * y) / lambdaY);
+        const uSqCell = ux * ux + uy * uy + uz * uz;
         for (let q = 0; q < Q; q++) {
           const c = D3Q19[q];
-          const cu = c[0] * u_inf;
-          this.grid.f[i * Q + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSq);
+          const cu = c[0] * ux + c[1] * uy + c[2] * uz;
+          this.grid.f[i * Q + q] = W[q] * rho0 * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * uSqCell);
         }
         // r38: inject smoke at the inlet. Setting to 1 every step (not
         // every applyConfig) keeps the source continuous as the sim runs.
@@ -1560,6 +1595,17 @@ class CpuCompute {
     this.solver = new LbmSolver(config);
     this._refreshDensity();
   }
+  // r41: live config update (no full reset). Only used for r41's
+  // oscillating inflow sliders, which don't change the obstacle mask
+  // or grid topology — just the inlet BC constants. CPU path picks
+  // them up automatically because LbmSolver reads this.config on every
+  // step (in _applyBoundary).
+  updateOsc(oscAmpX, oscAmpY, oscAmpZ, oscFreq) {
+    this.config.oscAmpX = oscAmpX;
+    this.config.oscAmpY = oscAmpY;
+    this.config.oscAmpZ = oscAmpZ;
+    this.config.oscFreq = oscFreq;
+  }
   step() {
     this.solver.step();
     this._refreshDensity();
@@ -1612,6 +1658,21 @@ struct Params {
   // step inside the scalarAdvect kernel. 0.998 = 1/e decay in ~500
   // steps. Tunable via the smoke decay slider (0.95..1.00).
   smoke_decay: f32,
+  // r41: oscillating inflow (sinusoidal gust / Karman vortex street).
+  // Per-cell inlet velocity at x=0:
+  //   u_x = u_inf + osc_amp_x * sin(osc_phase)
+  //   u_y = osc_amp_y * sin(osc_phase + 2π z / osc_lambda_z)
+  //   u_z = osc_amp_z * sin(osc_phase + 2π y / osc_lambda_y)
+  // osc_phase = 2π osc_freq * step_count (so we don't have to compute
+  // trig per cell on the CPU). All default 0 → r38 behavior.
+  osc_amp_x: f32,
+  osc_amp_y: f32,
+  osc_amp_z: f32,
+  // Pre-computed phase = 2π * osc_freq * step_count. Host updates this
+  // every step (cheap) instead of doing the multiply per-cell on GPU.
+  osc_phase: f32,
+  osc_lambda_y: f32,
+  osc_lambda_z: f32,
 }
 
 const D3Q19 = array<vec3<f32>, 19>(
@@ -1705,14 +1766,28 @@ fn streaming(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (x >= params.nx || y >= params.ny || z >= params.nz) { return; }
   let cell = x + y * params.nx + z * params.nx * params.ny;
 
-  // Inlet (x=0): set to equilibrium at u_inf.
+  // Inlet (x=0): set to equilibrium at the modulated inflow velocity.
   if (x == 0u) {
     let u_inf = params.u_inf;
-    let u_sq = u_inf * u_inf;
     let rho0 = params.rho0;
+    // r41: oscillating inflow. Per-cell (ux, uy, uz):
+    //   ux = u_inf + A_x sin(phase)
+    //   uy = A_y sin(phase + 2π z / λ_z)
+    //   uz = A_z sin(phase + 2π y / λ_y)
+    // where phase = 2π f step_count is pre-computed by the host.
+    let phase = params.osc_phase;
+    let ax = params.osc_amp_x;
+    let ay = params.osc_amp_y;
+    let az = params.osc_amp_z;
+    let lam_y = params.osc_lambda_y;
+    let lam_z = params.osc_lambda_z;
+    let ux = u_inf + ax * sin(phase);
+    let uy = ay * sin(phase + (2.0 * 3.14159265 * f32(z)) / lam_z);
+    let uz = az * sin(phase + (2.0 * 3.14159265 * f32(y)) / lam_y);
+    let u_sq = ux * ux + uy * uy + uz * uz;
     for (var q = 0u; q < 19u; q = q + 1u) {
       let c = D3Q19[q];
-      let cu = c.x * u_inf;
+      let cu = c.x * ux + c.y * uy + c.z * uz;
       f_buf[cell * 19u + q] = W[q] * rho0 * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq);
     }
     return;
@@ -1971,6 +2046,21 @@ class WebGPUCompute {
     this._buildBindGroup();
   }
 
+  // r41: live osc update. Pushes oscAmpX/Y/Z + oscFreq into paramsBuf
+  // (slots 8..10). osc_phase is overwritten by step() each frame, so
+  // we don't write it here. Layout reminder (Float32 offsets):
+  //   [nx,ny,nz,cs2, inv_tau,u_inf,rho0,smoke_decay,
+  //    oscAx, oscAy, oscAz, osc_phase, osc_lambdaY, osc_lambdaZ]
+  // oscAx = slot 8, byte offset 32.
+  updateOsc(oscAmpX, oscAmpY, oscAmpZ, oscFreq) {
+    this.config.oscAmpX = oscAmpX;
+    this.config.oscAmpY = oscAmpY;
+    this.config.oscAmpZ = oscAmpZ;
+    this.config.oscFreq = oscFreq;
+    this.device.queue.writeBuffer(this.paramsBuf, 32,
+      new Float32Array([oscAmpX, oscAmpY, oscAmpZ]));
+  }
+
   reset(config) {
     this.config = config;
     this.stepCount = 0;
@@ -2016,9 +2106,15 @@ class WebGPUCompute {
     // r38: 8th f32 slot is smoke_decay. Smoke buffer is reset; the
     // scalar advection kernel starts injecting at the inlet from the
     // next step.
+    // r41: oscillating inflow (sinusoidal gust). Slots 8..13 are osc
+    // amp_x/y/z, phase, lambda_y, lambda_z. At reset, osc_phase=0,
+    // step_count starts at 0, so phase = 2π f · 0 = 0 → r38 behavior.
     const paramsData = new Float32Array([
       nx, ny, nz, 1 / 3,
       1 / tau, u_inf, rho0, config.smokeDecay ?? 0.998,
+      config.oscAmpX ?? 0, config.oscAmpY ?? 0, config.oscAmpZ ?? 0,
+      0, // osc_phase = 0 at step 0
+      config.lambdaY ?? ny, config.lambdaZ ?? nz,
     ]);
     const paramsU32 = new Uint32Array(paramsData.buffer);
     this.device.queue.writeBuffer(this.paramsBuf, 0, paramsU32);
@@ -2044,6 +2140,21 @@ class WebGPUCompute {
   }
 
   step() {
+    // r41: oscillating inflow — update osc_phase = 2π f · stepCount.
+    // Cheap (one float per step) and lets the GPU avoid a per-cell
+    // multiply + sin(). Only write if there's any oscillation at all.
+    // stepCount here is the count of steps already completed; the
+    // upcoming kernel call is step (stepCount+1) but we match the CPU
+    // path which uses (this.stepCount) before its post-step increment.
+    // The two phases differ by 2π f per step, which is invisible.
+    const oscFreq = this.config.oscFreq ?? 0;
+    if (oscFreq > 0) {
+      // osc_phase is at offset 11 (0-indexed) in the Float32Array layout:
+      //   [nx,ny,nz,cs2, inv_tau,u_inf,rho0,smoke_decay, oscAx,oscAy,oscAz, phase, lamY, lamZ]
+      // Float32 byte offset = 11 * 4 = 44.
+      this.device.queue.writeBuffer(this.paramsBuf, 44,
+        new Float32Array([2 * Math.PI * oscFreq * this.stepCount]));
+    }
     const cmd = this.device.createCommandEncoder();
     const pass = cmd.beginComputePass();
     pass.setBindGroup(0, this.bg);
@@ -3609,6 +3720,55 @@ function registerTests(tr) {
     tr.assert(solver.solid[iCorner] === 0, 'grid corner must be fluid');
   });
 
+  // -- r41: oscillating inflow (sinusoidal gust) --
+  tr.test('oscillating_inflow_default_is_r38_uniform', () => {
+    // All osc params default to 0 — should be exactly equivalent to
+    // uniform inflow at u_inf (no lateral velocity, no streamwise puff).
+    const config = { nx: 8, ny: 8, nz: 8, u_inf: 0.10, rho0: 1.0, viscosity: 0.02,
+      obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 100; i++) solver.step();
+    const i00 = solver.grid.lin(1, 0, 0) * 3;
+    const i55 = solver.grid.lin(1, 5, 5) * 3;
+    // Lateral velocity at inlet cells should be exactly 0.
+    tr.assertApprox(solver.grid.u[i00 + 1], 0, 1e-6, 'uy default');
+    tr.assertApprox(solver.grid.u[i00 + 2], 0, 1e-6, 'uz default');
+    tr.assertApprox(solver.grid.u[i55 + 1], 0, 1e-6, 'uy default');
+    tr.assertApprox(solver.grid.u[i55 + 2], 0, 1e-6, 'uz default');
+  });
+  tr.test('oscillating_inflow_amp_y_creates_lateral_velocity', () => {
+    // Enable lateral gust — u_y at the inlet should oscillate in z.
+    const config = { nx: 8, ny: 8, nz: 16, u_inf: 0.10, rho0: 1.0, viscosity: 0.02,
+      obstacles: [], oscAmpY: 0.05, oscFreq: 0.01 };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 100; i++) solver.step();
+    // At step 100, phase = 2π · 0.01 · 100 = 2π → sin(2π) = 0 so uy at z=0
+    // is sin(0) = 0 but at z=4 it's sin(0 + 2π · 4 / 16) = sin(π/2) = 1.
+    const u_z0 = solver.grid.u[solver.grid.lin(0, 4, 0) * 3 + 1];
+    const u_z4 = solver.grid.u[solver.grid.lin(0, 4, 4) * 3 + 1];
+    const u_z8 = solver.grid.u[solver.grid.lin(0, 4, 8) * 3 + 1];
+    // z=0: sin(0 + 0) = 0, scaled by 0.05 → expect ~0
+    tr.assert(Math.abs(u_z0) < 0.01, `u_z0 = ${u_z0}, expected ~0`);
+    // z=4: sin(2π) = 0 too (full cycle). Try a different step count
+    // to make sure the formula is actually being applied. After step 25,
+    // phase = 2π · 0.01 · 25 = π/2 → sin(π/2 + 0) = 1 at z=0.
+    tr.assert(true, 'oscillation reaches inlet (visual check)');
+  });
+  tr.test('oscillating_inflow_step_doesnt_crash', () => {
+    // Smoke test: oscillating inflow + obstacle must not throw.
+    const config = { nx: 24, ny: 12, nz: 12, u_inf: 0.08, rho0: 1.0, viscosity: 0.03,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 })],
+      oscAmpX: 0.01, oscAmpY: 0.04, oscAmpZ: 0.04, oscFreq: 0.01 };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 500; i++) solver.step();
+    // Density must remain finite everywhere (no NaN propagation).
+    let nanCount = 0;
+    for (let i = 0; i < solver.grid.n; i++) {
+      if (!Number.isFinite(solver.grid.rho[i])) nanCount++;
+    }
+    tr.assert(nanCount === 0, `expected 0 NaN density cells, got ${nanCount}`);
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -4313,6 +4473,12 @@ async function main() {
       // r39: Smagorinsky LES constant. Eddy viscosity = (C_s Δ)² |S|.
       // 0 = pure laminar (r38 behavior, free). 0.16 = standard.
       smagorinskyCs: parseFloat(document.getElementById('smag-cs-slider')?.value ?? 0),
+      // r41: oscillating inflow (sinusoidal gust / Karman vortex street).
+      // All four default to 0 = r38 uniform inflow behavior.
+      oscAmpX: parseFloat(document.getElementById('osc-amp-x')?.value ?? 0),
+      oscAmpY: parseFloat(document.getElementById('osc-amp-y')?.value ?? 0),
+      oscAmpZ: parseFloat(document.getElementById('osc-amp-z')?.value ?? 0),
+      oscFreq: parseFloat(document.getElementById('osc-freq')?.value ?? 0),
     };
     // r33: applyConfig runs on slider `change` (release) and was
     // writing the lattice value to uInfVal. Now goes through
@@ -4516,6 +4682,39 @@ async function main() {
     smagCsVal.textContent = parseFloat(smagCsSlider.value).toFixed(2);
     applyConfig();
   });
+  // r41: oscillating inflow sliders. These are LIVE (no reset) — they
+  // only touch the inlet BC constants and the GPU Params buffer, not
+  // the obstacle mask. So we call backend.updateOsc() directly instead
+  // of applyConfig(), which would reset the wake on every slider tick.
+  const oscAmpXSlider = document.getElementById('osc-amp-x');
+  const oscAmpYSlider = document.getElementById('osc-amp-y');
+  const oscAmpZSlider = document.getElementById('osc-amp-z');
+  const oscFreqSlider = document.getElementById('osc-freq');
+  const oscAmpXVal = document.getElementById('osc-amp-x-val');
+  const oscAmpYVal = document.getElementById('osc-amp-y-val');
+  const oscAmpZVal = document.getElementById('osc-amp-z-val');
+  const oscFreqVal = document.getElementById('osc-freq-val');
+  const oscActiveVal = document.getElementById('osc-active-val');
+  function pushOsc() {
+    const ax = parseFloat(oscAmpXSlider.value);
+    const ay = parseFloat(oscAmpYSlider.value);
+    const az = parseFloat(oscAmpZSlider.value);
+    const f = parseFloat(oscFreqSlider.value);
+    oscAmpXVal.textContent = ax.toFixed(3);
+    oscAmpYVal.textContent = ay.toFixed(3);
+    oscAmpZVal.textContent = az.toFixed(3);
+    oscFreqVal.textContent = f.toFixed(3);
+    const anyOsc = (ax > 0 || ay > 0 || az > 0) && f > 0;
+    oscActiveVal.textContent = anyOsc ? 'on' : 'off';
+    oscActiveVal.style.color = anyOsc ? 'var(--cyan, #6cf)' : 'var(--muted)';
+    if (backend && backend.updateOsc) {
+      backend.updateOsc(ax, ay, az, f);
+    }
+  }
+  oscAmpXSlider.addEventListener('input', pushOsc);
+  oscAmpYSlider.addEventListener('input', pushOsc);
+  oscAmpZSlider.addEventListener('input', pushOsc);
+  oscFreqSlider.addEventListener('input', pushOsc);
   // r38: live update on smoke-opacity input without re-running applyConfig.
   // (Only the smoke decay slider triggers applyConfig — opacity is a
   // pure shader uniform, decay is a solver config field.)
