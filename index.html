@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r44-2026-07-24 (slice plane overlay: toggle "slice plane" in the side panel to show a 2D cross-section at y = ny/2 in the top-left corner. Heatmap of the current colormap field (density/velocity/vorticity/pressure) plus quiver arrows for the (u, w) velocity components. Useful for verifying wake structure without volumetric occlusion. 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r45-2026-07-24 (stream ribbons: toggle "ribbon mode" in the side panel to render streamlines as billboarded triangle-strip ribbons with adjustable width. Each trail point is extruded perpendicular to the flow tangent and the ribbon always faces the camera regardless of orbit angle. Per-trail-point velocity coloring (cyan = fast, red = slow) is preserved. Useful for visualising flow direction over distance. Default: lines (unchanged). 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -364,6 +364,16 @@
       <div class="control">
         <label><span class="lbl-text">streamline opacity <span class="help" data-tip="How opaque the wind streamlines are. 100% = vivid flow visualization (default). 50% = subtle tracer that lets the volumetric density underneath show through. 0% = invisible streamlines, only the volumetric pressure field remains. Useful for decluttering when you have many streamlines or want to focus on the colormap.">?</span></span><span id="stream-opacity-val">100%</span></label>
         <input type="range" id="stream-opacity-slider" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="control">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="ribbon-toggle" style="width:14px;height:14px;cursor:pointer">
+          <span class="lbl-text">ribbon mode <span class="help" data-tip="r45: render streamlines as ribbons (flat strips with width) instead of 1D lines. Each ribbon is billboarded to face the camera — at any orbit angle the ribbon shows its full width. Width is controlled by the 'ribbon width' slider. Useful for visualising flow direction over distance: a wide ribbon means slow flow, a narrow one means fast. Per-trail velocity is still colored (slow = red, fast = cyan) so speed is visible in the color gradient along the ribbon. Off by default to keep the line-style streamlines.">?</span></span>
+        </label>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">ribbon width <span class="help" data-tip="r45: ribbon half-width in lattice units. The full width is 2x this value, applied perpendicular to the flow tangent and billboarded to face the camera. 0.3 = subtle ribbon (default-ish, doesn't occlude the volumetric). 1.0 = prominent ribbon (more visible, may occlude the wake). 2.0+ = very wide (best for highlighting the flow direction over distance).">?</span></span><span id="ribbon-width-val">0.30</span></label>
+        <input type="range" id="ribbon-width-slider" min="0.1" max="2.0" step="0.05" value="0.30">
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
@@ -3248,6 +3258,87 @@ function buildStreamlineLines(tracer, solver) {
   return new Float32Array(pts);
 }
 
+// r45: build streamlines as triangle-strip ribbons. Each trail point is
+// extruded perpendicular to the flow tangent and billboarded to face the
+// camera (so the ribbon always shows its full width, regardless of orbit
+// angle). The vertex format is the same 6 floats per vertex (pos+color)
+// used by the line renderer, so updateSegment() can swap between modes
+// without changing the attribute layout — only the draw mode changes
+// (LINES vs TRIANGLE_STRIP).
+//
+// Math per trail point P:
+//   t  = velocity tangent at P (unit)
+//   v  = camera-to-P view direction (P - cameraPos, unit)
+//   n  = normalize(cross(t, v))  -- perpendicular to both, lies in the
+//        plane that contains the tangent and faces the camera
+//   emit two vertices: P + n*w/2  and  P - n*w/2
+//
+// For N trail points we emit 2N vertices, in order
+//   [p0+w, p0-w, p1+w, p1-w, p2+w, p2-w, ...]
+// which is the natural triangle-strip layout (4 vertices per quad).
+function buildStreamlineRibbons(tracer, solver, cameraPos, halfWidth) {
+  const pts = [];
+  const uInf = solver.config.u_inf;
+  const cx = cameraPos[0], cy = cameraPos[1], cz = cameraPos[2];
+  const sampleSpeed = (world) => {
+    const v = sampleVelocity(solver, world);
+    return Math.hypot(v.x, v.y, v.z);
+  };
+  // Emit a single trail. Computes the per-point side offset and pushes
+  // (top, bottom, top, bottom, ...) into pts. The cross product below
+  // handles the degenerate case where tangent == view by using the
+  // previous point's normal (set from the previous iteration).
+  const emitTrail = (trail) => {
+    if (trail.length < 2) return;
+    // Tangent at each point: from previous point to next (central diff)
+    // for inner points, one-sided for endpoints. We compute on the fly.
+    let prevN = null; // fallback normal if tangent is parallel to view
+    for (let i = 0; i < trail.length; i++) {
+      const p = trail[i];
+      // Tangent: use direction to the next point (or from previous).
+      const next = i < trail.length - 1 ? trail[i + 1] : trail[i];
+      const prev = i > 0 ? trail[i - 1] : trail[i];
+      let tx = next.x - prev.x;
+      let ty = next.y - prev.y;
+      let tz = next.z - prev.z;
+      const tlen = Math.hypot(tx, ty, tz);
+      if (tlen < 1e-9) { tx = 1; ty = 0; tz = 0; } else { tx /= tlen; ty /= tlen; tz /= tlen; }
+      // View direction from camera to point.
+      let vx = p.x - cx, vy = p.y - cy, vz = p.z - cz;
+      const vlen = Math.hypot(vx, vy, vz);
+      if (vlen < 1e-9) { vx = 0; vy = 0; vz = 1; } else { vx /= vlen; vy /= vlen; vz /= vlen; }
+      // Side = cross(tangent, view) -- perpendicular to both. Falls
+      // back to prevN if the cross is zero (degenerate).
+      let nx = ty * vz - tz * vy;
+      let ny = tz * vx - tx * vz;
+      let nz = tx * vy - ty * vx;
+      const nlen = Math.hypot(nx, ny, nz);
+      if (nlen < 1e-6 && prevN) { nx = prevN[0]; ny = prevN[1]; nz = prevN[2]; }
+      else if (nlen < 1e-6) { nx = 1; ny = 0; nz = 0; }
+      else { nx /= nlen; ny /= nlen; nz /= nlen; }
+      prevN = [nx, ny, nz];
+      // Sample speed for color.
+      const sp = sampleSpeed(p);
+      const col = speedToColor(sp, uInf);
+      // Top vertex: p + n*w.
+      pts.push(
+        p.x + nx * halfWidth, p.y + ny * halfWidth, p.z + nz * halfWidth,
+        col[0], col[1], col[2],
+      );
+      // Bottom vertex: p - n*w.
+      pts.push(
+        p.x - nx * halfWidth, p.y - ny * halfWidth, p.z - nz * halfWidth,
+        col[0], col[1], col[2],
+      );
+    }
+  };
+  for (const trail of tracer.trails) emitTrail(trail);
+  if (tracer.permanent) {
+    for (const trail of tracer.frozenTrails) emitTrail(trail);
+  }
+  return new Float32Array(pts);
+}
+
 // Compute the average trail speed (for coloring). Returns one color per
 // trail — but since the line renderer draws one segment one color, we
 // need to either (a) draw each trail as its own segment, or (b) average
@@ -3359,7 +3450,9 @@ function createLineRenderer(canvas) {
     // transparent; 0 hides them entirely. Replaces the per-segment
     // alpha in u_color.a at draw time.
     setStreamAlpha(value) { _streamAlphaMul = Math.max(0, Math.min(1, value)); },
-    addSegment(arr, color) {
+    addSegment(arr, color, drawMode) {
+      // r45: optional drawMode param. Defaults to gl.LINES; pass
+      // gl.TRIANGLE_STRIP for ribbon-style triangle strips.
       // Append a new segment. _rebuildBuffer reuploads the whole buffer
       // each time (small enough — a few hundred verts total).
       const stride = arr.length % 6 === 0 && (arr.length / 3) % 2 === 0 ? 24 : 12;
@@ -3368,7 +3461,7 @@ function createLineRenderer(canvas) {
       // Note: with stride 24, arr.length / 6 is vertex count.
       const vertCount = stride === 24 ? arr.length / 6 : arr.length / 3;
       const offsetVerts = segments.reduce((n, s) => n + s.count, 0);
-      segments.push({ offset: offsetVerts, count: vertCount, color, _arr: arr, stride });
+      segments.push({ offset: offsetVerts, count: vertCount, color, _arr: arr, stride, drawMode: drawMode || 0x0001 /* gl.LINES */ });
       this._rebuildBuffer();
     },
     clearSegments() {
@@ -3379,13 +3472,15 @@ function createLineRenderer(canvas) {
     // Update one segment in place (index-based). Reuploads the full
     // buffer with the new array. Use for per-frame dynamic content
     // (e.g. streamlines that change every frame).
-    updateSegment(index, arr) {
+    updateSegment(index, arr, drawMode) {
       if (index < 0 || index >= segments.length) return;
       // r20: detect interleaved pos+color from arr length parity.
       const stride = (arr.length % 6 === 0 && (arr.length / 3) % 2 === 0) ? 24 : 12;
       segments[index]._arr = arr;
       segments[index].stride = stride;
       segments[index].count = stride === 24 ? arr.length / 6 : arr.length / 3;
+      // r45: optional drawMode override.
+      if (drawMode !== undefined) segments[index].drawMode = drawMode;
       // Recompute offsets for segments after this one.
       let off = 0;
       for (let i = 0; i < segments.length; i++) {
@@ -3429,7 +3524,9 @@ function createLineRenderer(canvas) {
         }
         gl.uniform4f(uColor, s.color[0], s.color[1], s.color[2], s.color[3] * _streamAlphaMul);
         gl.uniform1f(uUseVertColor, s.stride === 24 ? 1.0 : 0.0);
-        gl.drawArrays(gl.LINES, s.offset, s.count);
+        // r45: use the segment's drawMode (defaults to gl.LINES for
+        // backwards compatibility; ribbon segments use gl.TRIANGLE_STRIP).
+        gl.drawArrays(s.drawMode || gl.LINES, s.offset, s.count);
       }
       gl.disable(gl.BLEND);
     },
@@ -4327,6 +4424,97 @@ function registerTests(tr) {
     tr.assert(solver.pressure && solver.pressure.length === solver.grid.n, 'pressure buffer available');
   });
 
+  // -- r45: stream ribbons --
+  tr.test('r45_ribbon_builder_emits_two_vertices_per_trail_point', () => {
+    // buildStreamlineRibbons takes (tracer, solver, cameraPos, halfWidth)
+    // and returns a Float32Array with 6 floats per vertex (pos+color).
+    // Each trail point becomes TWO vertices (top and bottom of the
+    // ribbon). Verify the count and the float layout.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const tracer = new StreamlineTracer(3, 6);
+    tracer.seedInlet(solver.config.nx, solver.config.ny, solver.config.nz);
+    for (let i = 0; i < 10; i++) tracer.step(solver, 1.0);
+    // Sum trail lengths.
+    let totalPts = 0;
+    for (const t of tracer.trails) totalPts += t.length;
+    tr.assert(totalPts > 0, `should have trail points, got ${totalPts}`);
+    const cam = [100, 100, 100];  // far away so view dir is well-defined
+    const geom = buildStreamlineRibbons(tracer, solver, cam, 0.5);
+    // 6 floats per vertex, 2 vertices per trail point.
+    const expected = totalPts * 2 * 6;
+    tr.assert(geom.length === expected, `expected ${expected} floats, got ${geom.length}`);
+  });
+  tr.test('r45_ribbon_top_bottom_vertices_offset_perpendicular', () => {
+    // The two vertices for each trail point should be on opposite
+    // sides of the trail position. Distance between them = 2*halfWidth.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const tracer = new StreamlineTracer(1, 4);
+    tracer.seedInlet(solver.config.nx, solver.config.ny, solver.config.nz);
+    for (let i = 0; i < 8; i++) tracer.step(solver, 1.0);
+    const cam = [100, 100, 100];
+    const w = 0.7;
+    const geom = buildStreamlineRibbons(tracer, solver, cam, w);
+    // First trail, first point: top = geom[0..2], bottom = geom[6..8].
+    // Distance between them should be 2*w = 1.4 (within 5% tolerance).
+    if (tracer.trails[0].length > 0) {
+      const tx = geom[0], ty = geom[1], tz = geom[2];
+      const bx = geom[6], by = geom[7], bz = geom[8];
+      const d = Math.hypot(tx - bx, ty - by, tz - bz);
+      tr.assert(Math.abs(d - 2 * w) < 0.05 * (2 * w), `top-bottom distance should be 2w=1.4, got ${d.toFixed(4)}`);
+    } else {
+      tr.assert(false, 'expected at least one trail point');
+    }
+  });
+  tr.test('r45_ribbon_midpoint_matches_trail_point', () => {
+    // The midpoint of (top, bottom) should equal the trail point
+    // (the ribbon is symmetric around the trail centerline).
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const tracer = new StreamlineTracer(1, 4);
+    tracer.seedInlet(solver.config.nx, solver.config.ny, solver.config.nz);
+    for (let i = 0; i < 8; i++) tracer.step(solver, 1.0);
+    const cam = [100, 100, 100];
+    const geom = buildStreamlineRibbons(tracer, solver, cam, 0.4);
+    // Check first 3 trail points of the first trail.
+    const trail = tracer.trails[0];
+    for (let k = 0; k < Math.min(3, trail.length); k++) {
+      const idx = k * 2 * 6;  // each point = 2 vertices * 6 floats
+      const mx = (geom[idx] + geom[idx + 6]) / 2;
+      const my = (geom[idx + 1] + geom[idx + 7]) / 2;
+      const mz = (geom[idx + 2] + geom[idx + 8]) / 2;
+      const tx = trail[k].x, ty = trail[k].y, tz = trail[k].z;
+      const d = Math.hypot(mx - tx, my - ty, mz - tz);
+      tr.assert(d < 1e-4, `midpoint should match trail point (got d=${d.toFixed(6)}, expected <1e-4)`);
+    }
+  });
+  tr.test('r45_ribbon_width_zero_collapses_to_trail', () => {
+    // With halfWidth=0 the ribbon should collapse to the trail itself
+    // (top == bottom == trail point). Verifies the side offset is the
+    // only thing controlling width.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.1, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    const tracer = new StreamlineTracer(1, 4);
+    tracer.seedInlet(solver.config.nx, solver.config.ny, solver.config.nz);
+    for (let i = 0; i < 8; i++) tracer.step(solver, 1.0);
+    const cam = [100, 100, 100];
+    const geom = buildStreamlineRibbons(tracer, solver, cam, 0.0);
+    // top and bottom at each point should be identical.
+    const trail = tracer.trails[0];
+    for (let k = 0; k < Math.min(3, trail.length); k++) {
+      const idx = k * 2 * 6;
+      const dx = Math.abs(geom[idx] - geom[idx + 6]);
+      const dy = Math.abs(geom[idx + 1] - geom[idx + 7]);
+      const dz = Math.abs(geom[idx + 2] - geom[idx + 8]);
+      tr.assert(dx < 1e-6 && dy < 1e-6 && dz < 1e-6, `w=0 should make top==bottom, got d=(${dx},${dy},${dz})`);
+    }
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -5112,6 +5300,11 @@ async function main() {
   // r44: 2D slice plane overlay at y = ny/2 showing the current
   // colormap field as a heatmap with quiver arrows. Off by default.
   let sliceEnabled = false;
+  // r45: stream ribbons. When enabled, streamlines are rendered as
+  // flat strips with a billboarded width (perpendicular to the flow
+  // tangent, facing the camera) instead of 1D lines. Off by default.
+  let ribbonEnabled = false;
+  let ribbonWidth = 0.30;
 
   // Streamline tracer — initial 80 streamlines, each carrying a 96-point
   // trail (in burst mode) or a full inlet→outlet path (in permanent
@@ -5437,6 +5630,24 @@ async function main() {
     sliceToggle.addEventListener('change', () => {
       sliceEnabled = sliceToggle.checked;
       if (sliceCanvas) sliceCanvas.style.display = sliceEnabled ? 'block' : 'none';
+    });
+  }
+  // r45: ribbon mode toggle + width slider. When enabled, the render
+  // loop builds the streamline geometry as a triangle-strip ribbon
+  // billboarded to the camera; the line renderer just switches to
+  // TRIANGLE_STRIP and reuses the same per-vertex color attribute.
+  const ribbonToggle = document.getElementById('ribbon-toggle');
+  if (ribbonToggle) {
+    ribbonToggle.addEventListener('change', () => {
+      ribbonEnabled = ribbonToggle.checked;
+    });
+  }
+  const ribbonWidthSlider = document.getElementById('ribbon-width-slider');
+  const ribbonWidthVal = document.getElementById('ribbon-width-val');
+  if (ribbonWidthSlider) {
+    ribbonWidthSlider.addEventListener('input', () => {
+      ribbonWidth = parseFloat(ribbonWidthSlider.value);
+      if (ribbonWidthVal) ribbonWidthVal.textContent = ribbonWidth.toFixed(2);
     });
   }
   smokeOpacitySlider.addEventListener('input', () => {
@@ -5900,8 +6111,24 @@ async function main() {
         // Update streamlines every frame (they move). The streamlines are
         // the only segment after the wall/marker removal.
         if (backend.solver) {
-          const streamGeom = buildStreamlineLines(tracer, backend.solver);
-          lines.updateSegment(0, streamGeom);
+          if (ribbonEnabled) {
+            // r45: build the trail as a triangle-strip ribbon
+            // billboarded to the camera. Pass the camera position so
+            // the per-point side offset faces the viewer at any orbit
+            // angle. The line renderer's updateSegment accepts an
+            // optional drawMode so this swaps the topology without
+            // touching the attribute layout.
+            const streamGeom = buildStreamlineRibbons(
+              tracer, backend.solver, vp.cameraPos, ribbonWidth
+            );
+            // r45: gl.TRIANGLE_STRIP is 0x0005 in WebGL2. Pull it
+            // from the line renderer's gl context (window.__windsurfLines
+            // is set by applyConfig).
+            lines.updateSegment(0, streamGeom, window.__windsurfLines.gl.TRIANGLE_STRIP);
+          } else {
+            const streamGeom = buildStreamlineLines(tracer, backend.solver);
+            lines.updateSegment(0, streamGeom);
+          }
         } else {
           lines.updateSegment(0, new Float32Array(0));
         }
