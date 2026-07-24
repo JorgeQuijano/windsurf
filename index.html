@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r47-2026-07-24 (purple-tile fix: tightened smoke band-pass from [0.15, 0.60] to [0.20, 0.70]. The bulk volume's steady-state smoke (0.10-0.55 after a few hundred steps) was being swept into the band and rendered as a uniform dark viridis tint, producing visible purple/blue trapezoids at certain camera angles. The wake (smoke 0.25-0.70) is still caught.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r48-2026-07-24 (camera preset buttons: top-down / side-on / iso / wake-view. Click a button under "camera preset" or press keys 1-4 to snap the orbit camera to a canonical view. Replaces the previous need to drag the mouse to a known-good angle.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -421,6 +421,16 @@
         <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_z (vertical) <span id="osc-amp-z-val" style="float:right">0.000</span></div>
         <input type="range" id="osc-freq" min="0" max="0.05" step="0.001" value="0.000">
         <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">frequency <span id="osc-freq-val" style="float:right">0.000</span></div>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">camera preset <span class="help" data-tip="r48: snap the orbit camera to a canonical view. top-down: look straight down on the tunnel (good for verifying wake footprint). side-on: view from the z-axis (good for visualizing wake roll-up). isometric: the default 3/4 angle. wake-view: look from downstream toward the cube (good for visualizing the wake envelope). Keys 1-4 also trigger these.">?</span></span><span id="camera-preset-val">iso</span></label>
+        <div class="row" style="display:flex;gap:4px;padding:2px 0">
+          <button class="preset-btn" data-preset="top-down" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">top-down</button>
+          <button class="preset-btn" data-preset="side-on" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">side-on</button>
+          <button class="preset-btn" data-preset="iso" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">iso 3/4</button>
+          <button class="preset-btn" data-preset="wake-view" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">wake</button>
+        </div>
+        <div class="row" style="padding:4px 0;font-size:10px;color:var(--muted)">keys: <kbd>1</kbd> top-down &middot; <kbd>2</kbd> side-on &middot; <kbd>3</kbd> iso &middot; <kbd>4</kbd> wake</div>
       </div>
       <div class="control">
         <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -4953,6 +4963,83 @@ function registerTests(tr) {
     tr.assert(r.cd > 0.1, `cd too low: ${r.cd}`);
     tr.assert(r.cd < 3.0, `cd too high: ${r.cd}`);
   });
+
+  // -- r48: camera preset angles --
+  // The four preset buttons (top-down, side-on, isometric, wake-view)
+  // call a `setPreset(name)` method on the camera closure to snap
+  // (theta, phi, dist) to canonical values.
+  tr.test('r48_camera_set_preset_method_exists', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    tr.assert(typeof cam.setPreset === 'function', 'expected setPreset() on camera');
+  });
+  tr.test('r48_camera_preset_iso_matches_default', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    cam.reset(spec);
+    const defaultPos = cam.pos;
+    cam.setPreset('iso');
+    const isoPos = cam.pos;
+    tr.assert(Math.abs(isoPos.x - defaultPos.x) < 0.01,
+      `iso preset x should match default reset x: ${isoPos.x} vs ${defaultPos.x}`);
+    tr.assert(Math.abs(isoPos.y - defaultPos.y) < 0.01,
+      `iso preset y should match default reset y: ${isoPos.y} vs ${defaultPos.y}`);
+    tr.assert(Math.abs(isoPos.z - defaultPos.z) < 0.01,
+      `iso preset z should match default reset z: ${isoPos.z} vs ${defaultPos.z}`);
+  });
+  tr.test('r48_camera_preset_top_down_yields_high_phi', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    cam.setPreset('top-down');
+    const pos = cam.pos;
+    const dist = Math.hypot(pos.x, pos.y, pos.z);
+    tr.assert(pos.y / dist > 0.7,
+      `top-down must have y/dist > 0.7, got ${pos.y / dist}`);
+  });
+  tr.test('r48_camera_preset_wake_view_yields_positive_x', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    cam.setPreset('wake-view');
+    const pos = cam.pos;
+    tr.assert(pos.x > 10, `wake-view must be downstream (x > 10), got ${pos.x}`);
+  });
+  tr.test('r48_camera_preset_side_on_keeps_camera_horizontal', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    cam.setPreset('side-on');
+    const pos = cam.pos;
+    const dist = Math.hypot(pos.x, pos.y, pos.z);
+    tr.assert(Math.abs(pos.y) / dist < 0.2,
+      `side-on must be approximately horizontal, got y/dist = ${pos.y / dist}`);
+    tr.assert(Math.abs(pos.z) / dist > 0.7,
+      `side-on must be mostly in z, got z/dist = ${pos.z / dist}`);
+  });
+  tr.test('r48_camera_preset_unknown_name_is_noop', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    cam.reset(spec);
+    const before = cam.pos;
+    cam.setPreset('not-a-real-preset');
+    const after = cam.pos;
+    tr.assert(Math.abs(before.x - after.x) < 1e-6 &&
+              Math.abs(before.y - after.y) < 1e-6 &&
+              Math.abs(before.z - after.z) < 1e-6,
+      'setPreset(unknown) must be a no-op');
+  });
+  tr.test('r48_camera_preset_table_has_four_distinct_views', () => {
+    const spec = { nx: 32, ny: 16, nz: 16 };
+    const cam = makeCamera(spec);
+    const seen = {};
+    for (const name of ['top-down', 'side-on', 'iso', 'wake-view']) {
+      cam.setPreset(name);
+      const pos = cam.pos;
+      const key = `${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}`;
+      seen[name] = key;
+    }
+    const keys = Object.values(seen);
+    const unique = new Set(keys);
+    tr.assert(unique.size === 4, `presets must be distinct, got ${keys.join(' | ')}`);
+  });
 }
 
 /* =====================================================================
@@ -5034,6 +5121,22 @@ function makeCamera(spec) {
     get pos() { return update().pos; },
     drag(dx, dy) { theta -= dx * 0.005; phi -= dy * 0.005; phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi)); },
     wheel(d) { dist *= (1 + d * 0.001); dist = Math.max(2, Math.min(500, dist)); },
+    // r48: snap (theta, phi, dist) to a canonical "preset" view. Used by
+    // the top-down / side-on / iso / wake-view buttons in the side panel.
+    // The preset is matched on a normalized key (lowercased, trimmed);
+    // an unknown name is a no-op so a future panel typo can't crash the
+    // camera. The floor clamp is reapplied at the end so a preset that
+    // violates the floor margin (e.g. top-down at low dist) is corrected.
+    setPreset(name) {
+      const k = String(name || '').toLowerCase().trim();
+      const r = Math.max(spec.nx, spec.ny, spec.nz) * 1.4;
+      if (k === 'iso')             { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = r; }
+      else if (k === 'top-down')   { theta = Math.PI * 0.25; phi = Math.PI * 0.10; dist = r; }
+      else if (k === 'side-on')    { theta = Math.PI * 0.50; phi = Math.PI * 0.50; dist = r; }
+      else if (k === 'wake-view')  { theta = Math.PI * 0.00; phi = Math.PI * 0.42; dist = r; }
+      else return;          // unknown preset — no-op
+      clampPhi();
+    },
     reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = Math.max(spec.nx, spec.ny, spec.nz) * 1.4; },
   };
 }
@@ -6213,7 +6316,38 @@ async function main() {
     window.addEventListener('mouseup', up);
   });
   canvas.addEventListener('wheel', (e) => { camera.wheel(e.deltaY); e.preventDefault(); }, { passive: false });
-  window.addEventListener('keydown', (e) => { if (e.key === 'r' || e.key === 'R') camera.reset(spec); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') camera.reset(spec);
+    // r48: keyboard shortcuts for the four camera presets.
+    else if (e.key === '1') setPreset('top-down');
+    else if (e.key === '2') setPreset('side-on');
+    else if (e.key === '3') setPreset('iso');
+    else if (e.key === '4') setPreset('wake-view');
+  });
+
+  // r48: camera preset buttons. Each button calls setPreset(name) which
+  // snaps (theta, phi, dist) on the camera. The active-preset label and
+  // the button highlight update so the user always sees which view is
+  // currently engaged. The label is also updated by mouse-drag (any drag
+  // deselects the preset label back to 'iso' since the user has left the
+  // canonical view).
+  const cameraPresetVal = document.getElementById('camera-preset-val');
+  const presetBtns = Array.from(document.querySelectorAll('.preset-btn'));
+  function setPreset(name) {
+    camera.setPreset(name);
+    if (cameraPresetVal) cameraPresetVal.textContent = name;
+    for (const b of presetBtns) {
+      const active = b.dataset.preset === name;
+      b.style.background = active ? 'var(--accent)' : 'var(--panel-2)';
+      b.style.color = active ? 'var(--bg)' : 'var(--text)';
+      b.style.borderColor = active ? 'var(--accent)' : 'var(--border)';
+    }
+  }
+  for (const b of presetBtns) {
+    b.addEventListener('click', () => setPreset(b.dataset.preset));
+  }
+  // Initialise the button highlight to match the default 'iso'.
+  setPreset('iso');
 
   // Self-test runner.
   const tr = new TestRunner();
