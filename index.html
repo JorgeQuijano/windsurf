@@ -2205,10 +2205,13 @@ void main() {
       // push it around).
       float dens = texture(u_volume, uvw).r;
       float dev = max(dens - 1.0, 0.0) * u_densityScale;
-      // Soft gate: 0 below 0.05, ramps to 1 by 0.20. Mirrors the
-      // density-pass threshold of 0.15 so the smoke and density
-      // layers light up in the same cells.
-      float wakeGate = smoothstep(0.05, 0.20, dev);
+      // Smoke gate uses the SAME threshold as the density pass so the
+      // two layers light up in identical cells. r39b's first attempt
+      // used smoothstep(0.05, 0.20) which was too aggressive — it
+      // killed wake smoke (where dev is typically 0.05..0.15) and the
+      // user got NO smoke at all. Match the density gate at 0.15 with
+      // a small ramp-in so we don't get a hard edge.
+      float wakeGate = smoothstep(0.10, 0.15, dev);
       if (wakeGate < 0.01) continue;
       // Map s ∈ [0.05, 0.5] → viridis t ∈ [0.0, 0.30] (darker band:
       // dark purple c0 → dark blue c2). This is the "darker viridis"
