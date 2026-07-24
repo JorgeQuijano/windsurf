@@ -2700,8 +2700,8 @@ void main() {
       // means no buildup) and the sign for the diverging colormap
       // (red = high pressure / stagnation on the upstream face,
       // blue = low pressure / wake suction behind the cube).
-      d = abs(val) * u_densityScale * 80.0;
-      thr = 0.02;            // r42: lowered from 0.05 so even mild pressure regions show as a tint.
+      d = abs(val) * u_densityScale * 200.0; // r43 polish: 80→200 — small domain needs more punch to make the diverging red/blue visible.
+      thr = 0.01;            // r43 polish: 0.02→0.01 so the mild wake suction (|p| ~ 0.0005) shows as a blue tint.
       // Override vT — we'll use a sign-encoded diverging map below.
       vTMin = -1.0;
       vTRange = 2.0;
