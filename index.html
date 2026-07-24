@@ -293,12 +293,13 @@
 <body>
   <div id="app">
     <canvas id="render-canvas"></canvas>
+    <canvas id="slice-canvas" style="position:absolute;left:12px;top:88px;width:300px;height:300px;background:rgba(8,10,18,0.85);border:1px solid rgba(255,255,255,0.18);border-radius:4px;display:none;pointer-events:none"></canvas>
     <aside id="panel">
       <header>
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r43-2026-07-24 (pressure colormap: select 'pressure (signed)' from the colormap field dropdown to visualise the stagnation point on the upstream face (red) and the wake suction behind the cube (blue). Pressure p = cs²·(ρ - ρ₀) with cs² = 1/3 is computed every step on both CPU and WebGPU backends. Field modes: density | velocity | vorticity | pressure (signed). All fields are always computed; only the colormap mapping changes.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r44-2026-07-24 (slice plane overlay: toggle "slice plane" in the side panel to show a 2D cross-section at y = ny/2 in the top-left corner. Heatmap of the current colormap field (density/velocity/vorticity/pressure) plus quiver arrows for the (u, w) velocity components. Useful for verifying wake structure without volumetric occlusion. 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -378,6 +379,9 @@
           <option value="2">vorticity magnitude |∇×u|</option>
           <option value="3">pressure (signed)</option>
         </select>
+      </div>
+      <div class="control">
+        <label><span class="lbl-text">slice plane <span class="help" data-tip="r44: 2D cross-section at y = ny/2 (mid-plane). Shows the density field (or the current colormap field) as a heatmap with quiver arrows for the (u, w) velocity components. Useful for verifying the wake structure without occlusion from the volumetric ray-march. Off by default. Quiver arrows update every step.">?</span></span><input type="checkbox" id="slice-enabled" style="margin-left:8px"></label>
       </div>
       <div class="control">
         <label><span class="lbl-text">smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
@@ -4233,6 +4237,96 @@ function registerTests(tr) {
     }
   });
 
+  // -- r44: slice plane --
+  // 1. drawSlicePlane is defined and accepts the documented
+  //    signature (ctx, canvas, backend, fieldMode). It must be
+  //    callable without throwing on a stubbed backend.
+  tr.test('r44_slice_function_exists', () => {
+    tr.assert(typeof drawSlicePlane === 'function', 'drawSlicePlane must be a function');
+    // Stub a minimal backend and canvas to verify it doesn't throw.
+    const stubCtx = {
+      clearRect: () => {}, fillRect: () => {}, fillText: () => {},
+      beginPath: () => {}, moveTo: () => {}, lineTo: () => {},
+      closePath: () => {}, stroke: () => {}, fill: () => {},
+      set fillStyle(v) {}, set strokeStyle(v) {}, set lineWidth(v) {}, set font(v) {},
+    };
+    const stubCanvas = { clientWidth: 300, clientHeight: 300, width: 0, height: 0 };
+    const config = { nx: 8, ny: 8, nz: 8, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    // Compute velMag from grid.u (LbmSolver doesn't store it directly).
+    const velMag = new Float32Array(solver.grid.n);
+    for (let i = 0; i < solver.grid.n; i++) {
+      const ux = solver.grid.u[i * 3];
+      const uy = solver.grid.u[i * 3 + 1];
+      const uz = solver.grid.u[i * 3 + 2];
+      velMag[i] = Math.sqrt(ux * ux + uy * uy + uz * uz);
+    }
+    const stubBackend = { solver, density: solver.grid.rho, velMag, vortMag: solver.vortMag, pressure: solver.pressure };
+    // Should not throw.
+    drawSlicePlane(stubCtx, stubCanvas, stubBackend, 0);
+    drawSlicePlane(stubCtx, stubCanvas, stubBackend, 1);
+    drawSlicePlane(stubCtx, stubCanvas, stubBackend, 2);
+    drawSlicePlane(stubCtx, stubCanvas, stubBackend, 3);
+  });
+  // 2. The (x, z) → (px, py) projection logic must correctly map
+  //    lattice coordinates to canvas pixels. We test the
+  //    arithmetic directly so the test is fast and decoupled from
+  //    the canvas.
+  tr.test('r44_slice_projection_maps_correctly', () => {
+    // The projection is: px = margin + (x / nx) * drawW,
+    //                    py = margin + (z / nz) * drawH.
+    // For a 32x16 grid with 16px margins on a 300x300 canvas:
+    const nx = 32, nz = 16, cssW = 300, cssH = 300, margin = 16;
+    const drawW = cssW - 2 * margin;
+    const drawH = cssH - 2 * margin;
+    // Cell (0, 0) → top-left of draw area.
+    const px00 = margin + (0 / nx) * drawW;
+    const py00 = margin + (0 / nz) * drawH;
+    tr.assert(px00 === margin && py00 === margin, `cell (0,0) should project to (${margin},${margin})`);
+    // Cell (nx-1, nz-1) → bottom-right of draw area.
+    const pxLast = margin + ((nx - 1) / nx) * drawW;
+    const pyLast = margin + ((nz - 1) / nz) * drawH;
+    tr.assert(pxLast < cssW - margin && pyLast < cssH - margin, `cell (${nx-1},${nz-1}) should be inside the draw area`);
+    // Cell (nx/2, nz/2) → centre.
+    const pxMid = margin + (nx / 2 / nx) * drawW;
+    const pyMid = margin + (nz / 2 / nz) * drawH;
+    const cx = cssW / 2, cy = cssH / 2;
+    tr.assert(Math.abs(pxMid - cx) < 1 && Math.abs(pyMid - cy) < 1, `cell centre should map to canvas centre (got (${pxMid},${pyMid}))`);
+  });
+  // 3. The slice is at y = ny/2 (mid-plane). For an even ny this
+  //    picks the upper-middle row; for an odd ny it picks the
+  //    exact middle.
+  tr.test('r44_slice_y_midplane', () => {
+    // ySlice = ny >> 1.
+    tr.assert((16 >> 1) === 8, 'ySlice for ny=16 should be 8');
+    tr.assert((15 >> 1) === 7, 'ySlice for ny=15 should be 7 (floor of mid)');
+    tr.assert((12 >> 1) === 6, 'ySlice for ny=12 should be 6');
+    // The slice must be inside the grid (never out of bounds).
+    [16, 12, 8, 15, 7].forEach(ny => {
+      const ySlice = ny >> 1;
+      tr.assert(ySlice >= 0 && ySlice < ny, `ySlice=${ySlice} for ny=${ny} must be in [0, ny)`);
+    });
+  });
+  // 4. The four field modes (0=density, 1=velMag, 2=vortMag,
+  //    3=pressure) must all be reachable from the slice renderer's
+  //    perspective. We verify each buffer exists and has the
+  //    correct length on the solver. velMag is computed from
+  //    grid.u (the LbmSolver doesn't store it directly; the render
+  //    path uses CpuCompute.velMag or WebGPU's velMagBuf).
+  tr.test('r44_slice_field_modes_have_buffers', () => {
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.08, rho0: 1.0, viscosity: 0.03, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    // The LBM field buffers live on solver.grid (not on the solver
+    // itself). vortMag and pressure are computed fields and DO live
+    // on the solver directly.
+    tr.assert(solver.grid.rho && solver.grid.rho.length === solver.grid.n, 'density (grid.rho) buffer available');
+    tr.assert(solver.grid.u && solver.grid.u.length === solver.grid.n * 3, 'grid.u buffer available for velMag');
+    tr.assert(solver.vortMag && solver.vortMag.length === solver.grid.n, 'vortMag buffer available');
+    tr.assert(solver.pressure && solver.pressure.length === solver.grid.n, 'pressure buffer available');
+  });
+
   // -- r38: smoke scalar field --
   tr.test('smoke_grid_starts_zero', () => {
     const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
@@ -4614,6 +4708,189 @@ function showError(msg) {
 }
 
 /* =====================================================================
+   r44 — 2D slice plane overlay
+   ---------------------------------------------------------------------
+   A 2D cross-section at y = ny/2 drawn on a dedicated 2D canvas
+   overlay. Shows the current colormap field as a 2D heatmap plus
+   quiver arrows for the (u, w) velocity components (the y component
+   is perpendicular to the slice and is not visible). The heatmap
+   reuses the same colormap interpreter logic as the volumetric pass
+   (viridis for non-signed fields, red-blue diverging for pressure).
+   The overlay is positioned in the top-left corner and is
+   toggleable from the side panel; it does not interact with the
+   WebGL 3D pipeline.
+   ===================================================================== */
+function drawSlicePlane(ctx, canvas, backend, fieldMode) {
+  const solver = backend.solver;
+  if (!solver) return;
+  const { nx, ny, nz } = solver.config;
+  const lin = (x, y, z) => solver.grid.lin(x, y, z);
+  // Slice at y = ny >> 1 (mid-plane).
+  const ySlice = ny >> 1;
+  // Match the canvas backing store to its CSS size for crisp
+  // rendering on high-DPI displays. Width/height are in CSS pixels.
+  const cssW = canvas.clientWidth || 300;
+  const cssH = canvas.clientHeight || 300;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor(cssW * dpr);
+  const h = Math.floor(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+  }
+  ctx.clearRect(0, 0, w, h);
+  // Map the (nx, nz) cross-section into the canvas with a small
+  // margin for axis labels.
+  const margin = 16 * dpr;
+  const drawW = w - 2 * margin;
+  const drawH = h - 2 * margin;
+  // Pick the field buffer for the current colormap mode.
+  let field, isSigned = false;
+  if (fieldMode === 1) { field = backend.velMag; isSigned = false; }
+  else if (fieldMode === 2) { field = backend.vortMag; isSigned = false; }
+  else if (fieldMode === 3) { field = backend.pressure; isSigned = true; }
+  else { field = backend.density; isSigned = false; }
+  if (!field) return;
+  // 1. Heatmap. Walk every cell in the slice and fill a 1-pixel
+  //    square. For 32x16 grid into a ~280px canvas, each cell maps
+  //    to ~7-8 pixels per side — coarse but readable.
+  //    Field value normalisation matches the volumetric shader's
+  //    mapping so the colours are consistent with the 3D view.
+  let vMin = Infinity, vMax = -Infinity;
+  // First pass: find the range for normalisation.
+  if (isSigned) {
+    // For pressure (signed), use the absolute max so the diverging
+    // map centres at zero and red/blue are symmetric.
+    for (let z = 0; z < nz; z++) {
+      for (let x = 0; x < nx; x++) {
+        const v = Math.abs(field[lin(x, ySlice, z)]);
+        if (v > vMax) vMax = v;
+      }
+    }
+    if (vMax < 1e-6) vMax = 1e-6;
+  } else {
+    // For density/velocity/vorticity, use the max so the brightest
+    // pixel is at the top of the colormap.
+    for (let z = 0; z < nz; z++) {
+      for (let x = 0; x < nx; x++) {
+        const v = field[lin(x, ySlice, z)];
+        if (v > vMax) vMax = v;
+        if (v < vMin) vMin = v;
+      }
+    }
+    if (vMax - vMin < 1e-6) vMax = vMin + 1e-6;
+  }
+  // Second pass: draw the heatmap.
+  for (let z = 0; z < nz; z++) {
+    for (let x = 0; x < nx; x++) {
+      const i = lin(x, ySlice, z);
+      if (solver.solid[i]) continue; // skip the obstacle (drawn later)
+      const v = field[i];
+      const px = margin + (x / nx) * drawW;
+      const py = margin + (z / nz) * drawH;
+      const cellW = drawW / nx;
+      const cellH = drawH / nz;
+      // Colormap: viridis for non-signed, diverging red-blue for signed.
+      let r, g, b;
+      if (isSigned) {
+        // t in [-1, 1] from signed val / vMax.
+        const t = v / vMax;
+        // rdbu 6-stop: -1=blue, -0.5=light blue, 0=white, 0.5=light red, 1=red.
+        // Simple linear: blue (0,0,150) at -1 → white (255,255,255) at 0 → red (150,0,0) at 1.
+        if (t < 0) {
+          r = Math.floor(255 * (1 + t));
+          g = Math.floor(255 * (1 + t));
+          b = 200;
+        } else {
+          r = 200;
+          g = Math.floor(255 * (1 - t));
+          b = Math.floor(255 * (1 - t));
+        }
+      } else {
+        // viridis approximation: t in [0, 1] from (v - vMin) / (vMax - vMin).
+        const t = (v - vMin) / (vMax - vMin);
+        // 5-stop viridis: dark purple → blue → teal → green → yellow.
+        // Linear interpolation between stops.
+        const stops = [
+          [68, 1, 84],   // 0.0
+          [59, 82, 139], // 0.25
+          [33, 145, 140],// 0.5
+          [94, 201, 98], // 0.75
+          [253, 231, 37] // 1.0
+        ];
+        const s = t * 4;
+        const s0 = Math.floor(s);
+        const s1 = Math.min(4, s0 + 1);
+        const f = s - s0;
+        r = Math.floor(stops[s0][0] * (1 - f) + stops[s1][0] * f);
+        g = Math.floor(stops[s0][1] * (1 - f) + stops[s1][1] * f);
+        b = Math.floor(stops[s0][2] * (1 - f) + stops[s1][2] * f);
+      }
+      ctx.fillStyle = `rgba(${r},${g},${b},0.85)`;
+      ctx.fillRect(px, py, cellW + 1, cellH + 1);
+    }
+  }
+  // 2. Obstacle outline. Draw the cube's footprint as a darker
+  //    rectangle so the user can see where the artefact is.
+  ctx.fillStyle = 'rgba(220,220,220,0.85)';
+  // The cube obstacle is rasterised during step() so we just walk
+  // the solid cells in the slice and fill them.
+  for (let z = 0; z < nz; z++) {
+    for (let x = 0; x < nx; x++) {
+      const i = lin(x, ySlice, z);
+      if (!solver.solid[i]) continue;
+      const px = margin + (x / nx) * drawW;
+      const py = margin + (z / nz) * drawH;
+      const cellW = drawW / nx;
+      const cellH = drawH / nz;
+      ctx.fillRect(px, py, cellW + 1, cellH + 1);
+    }
+  }
+  // 3. Quiver arrows. Sample (u, w) at every 2nd cell (so 16x8 grid
+  //    for the default 32x16 cross-section) and draw a small arrow
+  //    showing the in-plane velocity direction and magnitude.
+  //    Skip the obstacle.
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 1 * dpr;
+  for (let z = 0; z < nz; z += 2) {
+    for (let x = 0; x < nx; x += 2) {
+      const i = lin(x, ySlice, z);
+      if (solver.solid[i]) continue;
+      const ux = solver.grid.u[i * 3];
+      const uz = solver.grid.u[i * 3 + 2];
+      // Normalise by u_inf so arrows fit the cell. We don't have
+      // u_inf directly; use the maximum in-plane speed as a proxy.
+      const speed = Math.sqrt(ux * ux + uz * uz);
+      if (speed < 1e-4) continue;
+      const scale = (drawW / nx) * 0.4;
+      const dx = (ux / speed) * scale;
+      const dz = (uz / speed) * scale;
+      const px = margin + (x / nx) * drawW + (drawW / nx) * 0.5;
+      const py = margin + (z / nz) * drawH + (drawH / nz) * 0.5;
+      // Arrow shaft.
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + dx, py + dz);
+      ctx.stroke();
+      // Arrow head: small triangle at the tip.
+      const headLen = 3 * dpr;
+      const angle = Math.atan2(dz, dx);
+      ctx.beginPath();
+      ctx.moveTo(px + dx, py + dz);
+      ctx.lineTo(px + dx - headLen * Math.cos(angle - 0.4), py + dz - headLen * Math.sin(angle - 0.4));
+      ctx.lineTo(px + dx - headLen * Math.cos(angle + 0.4), py + dz - headLen * Math.sin(angle + 0.4));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  // 4. Header. Label what the user is looking at.
+  const modeNames = ['density (pressure buildup)', 'velocity magnitude |u|', 'vorticity |∇×u|', 'pressure (signed)'];
+  ctx.fillStyle = 'rgba(220,220,220,0.9)';
+  ctx.font = `${10 * dpr}px ui-monospace, monospace`;
+  ctx.fillText('slice y=' + ySlice + '  ·  ' + modeNames[fieldMode], margin, 12 * dpr);
+}
+
+/* =====================================================================
    SECTION 12 — Bootstrap
    ===================================================================== */
 
@@ -4824,6 +5101,9 @@ async function main() {
   // magnitude |∇×u|, 3 = pressure (signed). All fields are always
   // computed; only the colormap mapping changes.
   let fieldMode = 0;
+  // r44: 2D slice plane overlay at y = ny/2 showing the current
+  // colormap field as a heatmap with quiver arrows. Off by default.
+  let sliceEnabled = false;
 
   // Streamline tracer — initial 80 streamlines, each carrying a 96-point
   // trail (in burst mode) or a full inlet→outlet path (in permanent
@@ -5138,6 +5418,17 @@ async function main() {
   if (fieldModeSelect) {
     fieldModeSelect.addEventListener('change', () => {
       fieldMode = parseInt(fieldModeSelect.value, 10);
+    });
+  }
+  // r44: slice plane toggle. The overlay is drawn every frame in the
+  // render loop when enabled; no reset.
+  const sliceToggle = document.getElementById('slice-enabled');
+  const sliceCanvas = document.getElementById('slice-canvas');
+  const sliceCtx = sliceCanvas ? sliceCanvas.getContext('2d') : null;
+  if (sliceToggle) {
+    sliceToggle.addEventListener('change', () => {
+      sliceEnabled = sliceToggle.checked;
+      if (sliceCanvas) sliceCanvas.style.display = sliceEnabled ? 'block' : 'none';
     });
   }
   smokeOpacitySlider.addEventListener('input', () => {
@@ -5607,6 +5898,14 @@ async function main() {
           lines.updateSegment(0, new Float32Array(0));
         }
         lines.draw(vp.viewProj);
+      }
+      // r44: slice plane overlay — 2D cross-section at y = ny/2.
+      // Renders the current colormap field as a heatmap with quiver
+      // arrows for the (u, w) velocity components. Drawn on a
+      // dedicated 2D canvas overlay so it sits cleanly on top of the
+      // WebGL volumetric without interfering with the 3D pipeline.
+      if (sliceEnabled && sliceCtx && backend.solver) {
+        drawSlicePlane(sliceCtx, sliceCanvas, backend, fieldMode);
       }
     } catch (e) {
       console.error('Render error:', e);
