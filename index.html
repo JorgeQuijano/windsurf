@@ -1269,8 +1269,13 @@ function computeDrag(solver, obstacleIdx) {
 
   const u_inf = solver.config.u_inf;
   // Dynamic pressure q = 0.5 ρ u². Cd = 2 F / (ρ u² A).
-  // Use the actual surface area (count of surface cells) as A.
-  const A = Math.max(area, 0.1);
+  // For a cube, surface area = 6 × face² and frontal area = face², so
+  // A_front ≈ surface / 6 for a cube. But the surface here includes
+  // edges/corners counted multiple times — we want a stable front
+  // approximation. The r38 code used area * 0.5 as the reference
+  // (≈ frontal area for a cube). Keep that for backwards-compat with
+  // existing Cd plots.
+  const A = Math.max(area * 0.5, 0.1);
   const q = rho0 * u_inf * u_inf;
   const cd_total = (area > 0 && u_inf > 1e-9) ? (2 * fx) / (q * A) : 0;
   const cd_pressure = (area > 0 && u_inf > 1e-9) ? (2 * fxp) / (q * A) : 0;
