@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r46-2026-07-24 (pathline burst: toggle "pathlines" in the side panel to inject a one-shot burst of 60 Lagrangian particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Trail color fades from bright orange (head) to dark red (tail) over ~24 steps, showing the time-history of each particle. Particles that exit the outlet or get stuck on the obstacle are removed. Useful for visualising transient flow: "where did the wind come from in the last second" vs streamlines "where the wind is going right now". Default off. 2D canvas overlay; no WebGL changes.) computed; only the colormap mapping changes.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r47-2026-07-24 (purple-tile fix: tightened smoke band-pass from [0.15, 0.60] to [0.20, 0.70]. The bulk volume's steady-state smoke (0.10-0.55 after a few hundred steps) was being swept into the band and rendered as a uniform dark viridis tint, producing visible purple/blue trapezoids at certain camera angles. The wake (smoke 0.25-0.70) is still caught.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2782,10 +2782,20 @@ void main() {
       //    [0.15, 0.30] smoke (typical wake), per-step alpha is
       //    0.03..0.06 and 50-step rays accumulate ~0.2..0.3 — a
       //    subtle, visible plume without the wash.
-      if (s < 0.15 || s > 0.60) continue;
-      // Map s ∈ [0.15, 0.60] → viridis t ∈ [0.0, 0.30] (darker band).
-      // s=0.15 → t=0 (darkest purple), s=0.60 → t=0.20 (dark blue).
-      float vT = 0.30 * clamp((s - 0.15) / 0.45, 0.0, 1.0);
+      if (s < 0.20 || s > 0.70) continue;
+      // r47: tightened band from [0.15, 0.60] → [0.20, 0.70]. The bulk
+      // volume's steady-state smoke settles at ~0.10-0.55 after a few
+      // hundred steps (smoke decay 0.998^N), so the old band was
+      // sweeping the bulk volume into the band-pass and rendering it
+      // as a uniform dark viridis tint. At certain camera angles the
+      // grazing rays through the box's top/side faces produced visible
+      // purple/blue trapezoids — the "purple tiles" bug. The wake
+      // recirculation zone has smoke in [0.25, 0.70] (deposition +
+      // accumulation), so the tighter band still catches the wake
+      // plume while skipping the bulk.
+      // Map s ∈ [0.20, 0.70] → viridis t ∈ [0.0, 0.30] (darker band).
+      // s=0.20 → t=0 (darkest purple), s=0.70 → t=0.30 (dark blue).
+      float vT = 0.30 * clamp((s - 0.20) / 0.50, 0.0, 1.0);
       vec3 color = viridis(vT);
       // Per-step alpha: 0.10 cap. The previous 0.25 cap is what
       // produced the long-ray wash — a 50-step ray through uniform
