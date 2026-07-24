@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r39b.3-2026-07-24 (smoke band-pass [0.15..0.60] + alpha cap 0.10 — kills inlet-column long-ray wash while keeping wake recirculation smoke visible)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r40-2026-07-24 (drag split: F_x = F_p (pressure, cyan) + F_v (viscous, orange); bar shows the composition; supports cube/sphere/cylinder/wedge/cone)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -306,7 +306,13 @@
         <div class="row"><span>sim steps/frame</span><span id="spf">0</span></div>
         <div class="row"><span>density</span><span id="density-stats" style="font-family:ui-monospace,monospace;font-size:11px">–</span></div>
         <div class="row"><span>Cd</span><span id="cd">–</span></div>
-        <div class="row"><span>F_x</span><span id="fx">–</span></div>
+        <div class="row"><span>F_x</span><span id="fx" style="font-weight:600">–</span></div>
+        <div class="row" style="padding-left:12px;font-size:11px"><span>F_p (pressure)</span><span id="fxp" style="color:#7ad7ff">–</span></div>
+        <div class="row" style="padding-left:12px;font-size:11px"><span>F_v (viscous)</span><span id="fxv" style="color:#ffb86b">–</span></div>
+        <div id="drag-bar" style="height:6px;border-radius:3px;background:var(--panel-2);overflow:hidden;margin:4px 0 8px;display:flex;border:1px solid var(--border)" title="drag composition: pressure (cyan) vs viscous (orange)">
+          <div id="drag-bar-p" style="background:#7ad7ff;width:100%;transition:width 120ms ease"></div>
+          <div id="drag-bar-v" style="background:#ffb86b;width:0%;transition:width 120ms ease"></div>
+        </div>
       </div>
       <div class="control" style="margin:8px 0 4px;padding:6px 8px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px">
         <label style="display:flex;justify-content:space-between;align-items:baseline">
@@ -1112,20 +1118,46 @@ class LbmSolver {
 
 function computeDrag(solver, obstacleIdx) {
   if (obstacleIdx >= solver.config.obstacles.length) {
-    return { force: { x: 0, y: 0, z: 0 }, cd: 0, area: 0, reynolds: 0, surfaceCells: 0 };
+    return {
+      force: { x: 0, y: 0, z: 0 },
+      pressureForce: { x: 0, y: 0, z: 0 },
+      viscousForce: { x: 0, y: 0, z: 0 },
+      cd: 0, cdPressure: 0, cdViscous: 0,
+      area: 0, reynolds: 0, surfaceCells: 0,
+    };
   }
   const obs = solver.config.obstacles[obstacleIdx];
   const { nx, ny, nz, rho0 } = solver.config;
   const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+  const u = solver.grid.u;
+  const lin = (x, y, z) => solver.grid.lin(x, y, z);
 
-  let fx = 0, fy = 0, fz = 0;
+  // r40: pressure + viscous split. The existing code computed pressure
+  // drag only (pressure * outward normal). We now add the viscous
+  // contribution using the velocity gradient tensor at each surface
+  // cell. Viscous stress σ_visc = ν ρ (∇u + ∇uᵀ). Traction on the
+  // obstacle surface is t = σ_visc · n; the force ON the obstacle is
+  // the opposite of the traction on the fluid, so F_visc = -σ_visc · n
+  // per unit area (multiplied by per-cell area = 1 lattice unit²).
+  //
+  // For an axis-aligned cube surface cell with neighbor fluid at (xx,
+  // yy, zz) and the surface cell itself having u = 0 (no-slip BC),
+  // the one-sided velocity difference gives ∂u/∂axis ≈ u_fluid / 1.
+  // The general central-difference form handles rotated cubes and
+  // curved surfaces (sphere/cylinder/wedge/cone).
+  let fx = 0, fy = 0, fz = 0;        // total = pressure + viscous
+  let fxp = 0, fyp = 0, fzp = 0;     // pressure only
+  let fxv = 0, fyv = 0, fzv = 0;     // viscous only
   let area = 0;
   const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+
+  // Kinematic viscosity for the viscous stress. In LBM, ν = c_s² (τ - 1/2).
+  const nu = solver.config.viscosity;
 
   for (let z = 0; z < nz; z++) {
     for (let y = 0; y < ny; y++) {
       for (let x = 0; x < nx; x++) {
-        const i = solver.grid.lin(x, y, z);
+        const i = lin(x, y, z);
         if (!solver.solid[i]) continue;
         // Surface cell? Has at least one fluid neighbour.
         let isSurface = false;
@@ -1133,28 +1165,122 @@ function computeDrag(solver, obstacleIdx) {
         for (const [dx, dy, dz] of dirs) {
           const xx = x + dx, yy = y + dy, zz = z + dz;
           if (xx < 0 || yy < 0 || zz < 0 || xx >= nx || yy >= ny || zz >= nz) continue;
-          const j = solver.grid.lin(xx, yy, zz);
+          const j = lin(xx, yy, zz);
           if (!solver.solid[j]) { isSurface = true; firstFluid = j; break; }
         }
         if (!isSurface) continue;
         const worldP = { x: x - cx, y: y - cy, z: z - cz };
         const n = obstacleNormal(obs, worldP);
-        const pressure = solver.grid.cs2 * (solver.grid.rho[firstFluid] - rho0);
-        fx -= pressure * n.x;
-        fy -= pressure * n.y;
-        fz -= pressure * n.z;
+        // Pressure term (unchanged from r38). Use fluid density at the
+        // first fluid neighbour.
+        const rhoFluid = solver.grid.rho[firstFluid];
+        const pressure = solver.grid.cs2 * (rhoFluid - rho0);
+        const px = pressure * n.x;
+        const py = pressure * n.y;
+        const pz = pressure * n.z;
+        fxp -= px; fyp -= py; fzp -= pz;
+
+        // Viscous term. Compute velocity gradient at the surface using
+        // one-sided differences where the solid (u=0 no-slip BC) is on
+        // one side, fluid on the other. For each axis a ∈ {x,y,z}:
+        //   ∂u_a/∂x_b ≈ (u_a_at_fluid_side - 0) / 1 if solid is here
+        //              (central diff if both sides are fluid).
+        // We probe the 6 face-neighbours for fluid cells.
+        const nxp = x + 1 < nx ? lin(x + 1, y, z) : -1;
+        const nxn = x - 1 >= 0 ? lin(x - 1, y, z) : -1;
+        const nyp = y + 1 < ny ? lin(x, y + 1, z) : -1;
+        const nyn = y - 1 >= 0 ? lin(x, y - 1, z) : -1;
+        const nzp = z + 1 < nz ? lin(x, y, z + 1) : -1;
+        const nzn = z - 1 >= 0 ? lin(x, y, z - 1) : -1;
+        // Mark which neighbours are fluid (not solid, in-bounds).
+        const isFluid = (idx) => idx >= 0 && !solver.solid[idx];
+        const isFp = isFluid(nxp), isFn = isFluid(nxn);
+        const isFp_y = isFluid(nyp), isFn_y = isFluid(nyn);
+        const isFp_z = isFluid(nzp), isFn_z = isFluid(nzn);
+
+        // Helper: get fluid velocity (x,y,z components) at a given
+        // index, defaulting to zero if not fluid.
+        const uAt = (idx, comp) => isFluid(idx) ? u[idx * 3 + comp] : 0;
+
+        // Velocity gradient du/dx (a=0..2 = u_x, u_y, u_z).
+        // ∂u_a/∂x: central if both fluid sides, else one-sided using
+        // whichever side is fluid; if neither fluid, 0 (rare corner case).
+        const dux_dx = (isFp && isFn)
+          ? (uAt(nxp, 0) - uAt(nxn, 0)) * 0.5
+          : (isFp ? uAt(nxp, 0) : (isFn ? -uAt(nxn, 0) : 0));
+        const duy_dx = (isFp && isFn)
+          ? (uAt(nxp, 1) - uAt(nxn, 1)) * 0.5
+          : (isFp ? uAt(nxp, 1) : (isFn ? -uAt(nxn, 1) : 0));
+        const duz_dx = (isFp && isFn)
+          ? (uAt(nxp, 2) - uAt(nxn, 2)) * 0.5
+          : (isFp ? uAt(nxp, 2) : (isFn ? -uAt(nxn, 2) : 0));
+
+        // ∂u_a/∂y: central if both y-sides fluid.
+        const dux_dy = (isFp_y && isFn_y)
+          ? (uAt(nyp, 0) - uAt(nyn, 0)) * 0.5
+          : (isFp_y ? uAt(nyp, 0) : (isFn_y ? -uAt(nyn, 0) : 0));
+        const duz_dy = (isFp_y && isFn_y)
+          ? (uAt(nyp, 2) - uAt(nyn, 2)) * 0.5
+          : (isFp_y ? uAt(nyp, 2) : (isFn_y ? -uAt(nyn, 2) : 0));
+
+        // ∂u_a/∂z: central if both z-sides fluid.
+        const dux_dz = (isFp_z && isFn_z)
+          ? (uAt(nzp, 0) - uAt(nzn, 0)) * 0.5
+          : (isFp_z ? uAt(nzp, 0) : (isFn_z ? -uAt(nzn, 0) : 0));
+        const duy_dz = (isFp_z && isFn_z)
+          ? (uAt(nzp, 1) - uAt(nzn, 1)) * 0.5
+          : (isFp_z ? uAt(nzp, 1) : (isFn_z ? -uAt(nzn, 1) : 0));
+
+        // Viscous stress tensor: σ_ab = ρ ν (∂u_a/∂x_b + ∂u_b/∂x_a)
+        // We compute (∇u + ∇uᵀ) here without the ρ ν factor; the
+        // multiplication by ν * ρFluid happens below.
+        const sig_xx = 2 * dux_dx;
+        const sig_yy = 2 * duy_dy;
+        const sig_zz = 2 * duz_dz;
+        const sig_xy = dux_dy + duy_dx;
+        const sig_xz = dux_dz + duz_dx;
+        const sig_yz = duy_dz + duz_dy;
+        // Traction t = σ · n with n OUTWARD (from solid to fluid) is
+        // by convention the force per unit area exerted BY the fluid
+        // ON the solid. So total force on obstacle = +Σ ν ρ t per
+        // surface cell (no minus sign — that's the pressure sign, not
+        // the viscous sign).
+        const t_x = sig_xx * n.x + sig_xy * n.y + sig_xz * n.z;
+        const t_y = sig_xy * n.x + sig_yy * n.y + sig_yz * n.z;
+        const t_z = sig_xz * n.x + sig_yz * n.y + sig_zz * n.z;
+        fxv += nu * rhoFluid * t_x;
+        fyv += nu * rhoFluid * t_y;
+        fzv += nu * rhoFluid * t_z;
+
+        // Total = pressure + viscous.
+        fx = fxp + fxv;
+        fy = fyp + fyv;
+        fz = fzp + fzv;
         area++;
       }
     }
   }
 
   const u_inf = solver.config.u_inf;
-  const cd = (area > 0 && u_inf > 1e-9)
-    ? (2 * fx) / (rho0 * u_inf * u_inf * Math.max(area * 0.5, 0.1))
-    : 0;
-  const nu = solver.config.viscosity;
+  // Dynamic pressure q = 0.5 ρ u². Cd = 2 F / (ρ u² A).
+  // Use the actual surface area (count of surface cells) as A.
+  const A = Math.max(area, 0.1);
+  const q = rho0 * u_inf * u_inf;
+  const cd_total = (area > 0 && u_inf > 1e-9) ? (2 * fx) / (q * A) : 0;
+  const cd_pressure = (area > 0 && u_inf > 1e-9) ? (2 * fxp) / (q * A) : 0;
+  const cd_viscous = (area > 0 && u_inf > 1e-9) ? (2 * fxv) / (q * A) : 0;
   const re = nu > 1e-9 ? u_inf * Math.sqrt(area) / nu : 0;
-  return { force: { x: fx, y: fy, z: fz }, cd, area, reynolds: re, surfaceCells: Math.floor(area) };
+  return {
+    force: { x: fx, y: fy, z: fz },
+    pressureForce: { x: fxp, y: fyp, z: fzp },
+    viscousForce: { x: fxv, y: fyv, z: fzv },
+    cd: cd_total,
+    cdPressure: cd_pressure,
+    cdViscous: cd_viscous,
+    area,
+    reynolds: re,
+    surfaceCells: Math.floor(area),
+  };
 }
 
 /* =====================================================================
@@ -3860,6 +3986,32 @@ async function main() {
   const spfEl = document.getElementById('spf');
   const cdEl = document.getElementById('cd');
   const fxEl = document.getElementById('fx');
+  // r40: pressure/viscous drag breakdown readout.
+  const fxpEl = document.getElementById('fxp');
+  const fxvEl = document.getElementById('fxv');
+  const dragBarP = document.getElementById('drag-bar-p');
+  const dragBarV = document.getElementById('drag-bar-v');
+  // r40: write pressure/viscous drag breakdown to UI. Bar shows
+  // |F_p| / (|F_p| + |F_v|) and |F_v| / (|F_p| + |F_v|) so the user
+  // can see whether drag is dominated by pressure (bluff body) or
+  // viscous (streamlined). If both are tiny, bar holds the previous
+  // state.
+  function updateDragUI(r) {
+    if (!r) return;
+    const fpx = r.pressureForce ? r.pressureForce.x : 0;
+    const fvx = r.viscousForce ? r.viscousForce.x : 0;
+    cdEl.textContent = r.cd.toFixed(3);
+    fxEl.textContent = r.force.x.toFixed(4);
+    fxpEl.textContent = fpx.toFixed(4);
+    fxvEl.textContent = fvx.toFixed(4);
+    const denom = Math.abs(fpx) + Math.abs(fvx);
+    if (denom > 1e-6) {
+      const pPct = (Math.abs(fpx) / denom) * 100;
+      const vPct = (Math.abs(fvx) / denom) * 100;
+      dragBarP.style.width = pPct.toFixed(1) + '%';
+      dragBarV.style.width = vPct.toFixed(1) + '%';
+    }
+  }
   const densityStatsEl = document.getElementById('density-stats');
   const uInfInput = document.getElementById('u-inf');
   const uInfVal = document.getElementById('u-inf-val');
@@ -4635,8 +4787,7 @@ async function main() {
         }
         if (backend.computeDragAsync) {
           backend.computeDragAsync(0).then(r => {
-            cdEl.textContent = r.cd.toFixed(3);
-            fxEl.textContent = r.force.x.toFixed(4);
+            updateDragUI(r);
             // Async path also feeds the plot.
             if (r && typeof r.cd === 'number') {
               recordCdSample(parseFloat(uInfInput.value), r.cd);
@@ -4754,13 +4905,11 @@ async function main() {
       stepEl.textContent = backend.stepCount;
       spfEl.textContent = simStepsPerFrame;
       if (dragReport) {
-        cdEl.textContent = dragReport.cd.toFixed(3);
-        fxEl.textContent = dragReport.force.x.toFixed(4);
+        updateDragUI(dragReport);
       } else if (!backend.computeDragAsync) {
         const r = backend.computeDrag ? backend.computeDrag(0) : null;
         if (r) {
-          cdEl.textContent = r.cd.toFixed(3);
-          fxEl.textContent = r.force.x.toFixed(4);
+          updateDragUI(r);
         }
       }
       simStepsPerSecond = simStepsThisSecond * (1000 / (t0 - lastStatsT));
