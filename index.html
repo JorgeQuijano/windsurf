@@ -2591,9 +2591,9 @@ void main() {
     float vTRange = 0.70;
     if (u_fieldMode == 0) {
       d = max(val - 1.0, 0.0) * u_densityScale;
-      thr = 0.15;
+      thr = 0.05;            // r42: lowered from 0.15 so the cube's mild pressure buildup (~1.02) is visible as a viridis tint.
     } else if (u_fieldMode == 1) {
-      d = val * u_densityScale * 0.30;
+      d = val * u_densityScale * 5.0;  // r42: 5x scales |u| ∈ [0, 0.1] into d ∈ [0, 2.5] — saturates into the viridis top range.
       thr = 0.05;
     } else if (u_fieldMode == 2) {
       // r42: vorticity magnitude. u_densityScale is shared with
@@ -2602,13 +2602,13 @@ void main() {
       // 30x brings the wake envelope into the viridis t ∈ [0.30, 1.0]
       // range without saturating the entire domain.
       d = val * u_densityScale * 30.0;
-      thr = 0.10;
+      thr = 0.05;            // r42: lowered from 0.10 so even mid-wake cells (|ω| ~ 0.01) contribute.
     } else if (u_fieldMode == 3) {
       // r42: pressure. Signed scalar re-encoded as |val| in the loader
       // (range-mapping into [0, 1] for R32F upload); see renderer
       // uploadVolume().
       d = val * u_densityScale * 80.0;
-      thr = 0.05;
+      thr = 0.02;            // r42: lowered from 0.05 so even mild pressure regions show as a tint.
     }
     if (d < thr) continue;
     float vT = vTMin + vTRange * clamp((d - thr) / (1.0 - thr), 0.0, 1.0);
@@ -5380,7 +5380,7 @@ async function main() {
           volumeMin: [-spec.nx / 2, -spec.ny / 2, -spec.nz / 2],
           volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
           densityScale: 5.0,    // r16: scale up after baseline subtraction. d = (val-1)*5 → max ≈ 2.5 → viridis teal-green for pressure regions, 0 (skipped) for bulk.
-          alphaScale: 0.20,     // r16: higher alpha per step since baseline subtraction removes bulk contribution; cumulative alpha ≈ 0.40 max where there IS pressure buildup.
+          alphaScale: 0.60,     // r42: bumped from 0.20 so wake structure is visible at default camera distance. Per-step alpha is clamped to 0.35 in the shader so this can crank without saturating.
           steps: 128,          // r9: doubled steps so the ray can resolve interior structure.
           fieldMode,
           solidOpacity: 0.0,
