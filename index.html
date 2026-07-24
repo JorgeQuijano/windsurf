@@ -2642,10 +2642,12 @@ void main() {
       thr = 0.05;
     } else if (u_fieldMode == 2) {
       // r42: vorticity magnitude. u_densityScale is shared with
-      // density — bump it back up so the cube's shear layers (typical
-      // |ω| ≈ 0.5..1.0) saturate the viridis t ∈ [0.30, 1.0] range.
-      d = val * u_densityScale * 5.0;
-      thr = 0.20;
+      // density. Empirically, the cube's shear layers hit |ω| ~ 0.05
+      // after a few hundred steps (low viscosity = 0.03, u_inf = 0.08);
+      // 30x brings the wake envelope into the viridis t ∈ [0.30, 1.0]
+      // range without saturating the entire domain.
+      d = val * u_densityScale * 30.0;
+      thr = 0.10;
     } else if (u_fieldMode == 3) {
       // r42: pressure. Signed scalar re-encoded as |val| in the loader
       // (range-mapping into [0, 1] for R32F upload); see renderer
