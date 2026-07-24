@@ -298,7 +298,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r39b.1-2026-07-24 (r39 + smoke-wake-gate fix: smoke alpha gated by LBM density deviation so the long-ray purple wash at glancing camera angles disappears; threshold 0.10..0.15 matches density pass so wake shear layers still light up)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r39b.3-2026-07-24 (smoke band-pass [0.15..0.60] + alpha cap 0.10 — kills inlet-column long-ray wash while keeping wake recirculation smoke visible)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -2183,46 +2183,32 @@ void main() {
       vec3 uvw = (p - u_volumeMin) / (u_volumeSize);
       if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
       float s = texture(u_smoke, uvw).r;
-      // Below threshold = no contribution (avoids the dark c0 wash
-      // everywhere). The scalar advection kernel has been decaying
-      // for ~500 steps, so smoke values cluster in [0, 0.5] in steady
-      // state; we want the visible range to be ~0.05..0.5.
-      if (s < 0.05) continue;
-      // r39: GATE SMOKE BY WAKE INTENSITY. The previous version
-      // rendered smoke wherever its value > 0.05 — which means
-      // everywhere in the inlet column (smoke=1.0) and most of
-      // the domain. Long rays through that uniform smoke built up
-      // a dark purple wash ("the purple tiles" the user keeps
-      // hitting), most visible at glancing camera angles.
-      // Fix: only render smoke where the LBM density deviation
-      // (val - 1) is in the wake range the density pass already
-      // considers visible (>= 0.15 after scale). The inlet column
-      // is steady-state density (=1.0 exactly), so dev = 0 and the
-      // smoke there is gated out. Smoke only renders in the wake
-      // shear layers and stagnation regions, which is the
-      // physically correct behavior anyway (smoke doesn't render
-      // in undisturbed free-stream — there's no obstruction to
-      // push it around).
-      float dens = texture(u_volume, uvw).r;
-      float dev = max(dens - 1.0, 0.0) * u_densityScale;
-      // Smoke gate uses the SAME threshold as the density pass so the
-      // two layers light up in identical cells. r39b's first attempt
-      // used smoothstep(0.05, 0.20) which was too aggressive — it
-      // killed wake smoke (where dev is typically 0.05..0.15) and the
-      // user got NO smoke at all. Match the density gate at 0.15 with
-      // a small ramp-in so we don't get a hard edge.
-      float wakeGate = smoothstep(0.10, 0.15, dev);
-      if (wakeGate < 0.01) continue;
-      // Map s ∈ [0.05, 0.5] → viridis t ∈ [0.0, 0.30] (darker band:
-      // dark purple c0 → dark blue c2). This is the "darker viridis"
-      // explicitly requested for the smoke layer.
-      float vT = 0.30 * clamp((s - 0.05) / 0.45, 0.0, 1.0);
+      // r39b.3: BAND-PASS GATE. r39b.1 used density deviation (too
+      // strict — wake density max was 1.012, the gate was at 0.15).
+      // r39b.2 used raised threshold (0.30) + lower alpha cap (0.08)
+      // which killed both the wash AND wake smoke. Final approach:
+      // band-pass the smoke value itself.
+      //  - Render only smoke in [0.15, 0.60]. This cuts out:
+      //      • the inlet column (smoke=1.0 → skipped, no more wash)
+      //      • the bulk volume (smoke has decayed to 0.05..0.15)
+      //  - Keeps visible smoke in the wake recirculation zone
+      //    where smoke accumulates to 0.20..0.50 (smoke that has
+      //    traveled past the obstacle but hasn't fully decayed).
+      //  - Cap per-step alpha at 0.10 so a 100-step ray through
+      //    uniformly-max-band smoke saturates at 1-(1-0.10)^100 ≈ 1.0
+      //    only in regions where the smoke is really dense. At
+      //    [0.15, 0.30] smoke (typical wake), per-step alpha is
+      //    0.03..0.06 and 50-step rays accumulate ~0.2..0.3 — a
+      //    subtle, visible plume without the wash.
+      if (s < 0.15 || s > 0.60) continue;
+      // Map s ∈ [0.15, 0.60] → viridis t ∈ [0.0, 0.30] (darker band).
+      // s=0.15 → t=0 (darkest purple), s=0.60 → t=0.20 (dark blue).
+      float vT = 0.30 * clamp((s - 0.15) / 0.45, 0.0, 1.0);
       vec3 color = viridis(vT);
-      // Per-step alpha cap at 0.25 so the smoke never fully saturates
-      // the volume; multiplied by u_smokeOpacity (master 0..1) so the
-      // user can fade the whole layer in/out. wakeGate cuts it down
-      // in free-stream so the long-ray purple wash disappears.
-      float a = clamp(s * 0.5 * u_smokeOpacity, 0.0, 0.25) * wakeGate;
+      // Per-step alpha: 0.10 cap. The previous 0.25 cap is what
+      // produced the long-ray wash — a 50-step ray through uniform
+      // smoke=0.5 alphaed at 0.25 each saturated to 1.0 immediately.
+      float a = clamp(s * 0.15 * u_smokeOpacity, 0.0, 0.10);
       // Composite UNDER the density pass: this is the new "back"
       // being added in front of the existing density accumulation.
       // The standard front-to-back blender with (1.0 - accumAlpha2)
