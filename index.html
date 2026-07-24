@@ -1171,6 +1171,11 @@ function computeDrag(solver, obstacleIdx) {
         if (!isSurface) continue;
         const worldP = { x: x - cx, y: y - cy, z: z - cz };
         const n = obstacleNormal(obs, worldP);
+        // Defensive skip: cone apex / sharp corners can produce non-finite
+        // normals (the SDF gradient can be Inf or NaN at the apex cell).
+        // Pre-existing r38 bug — the new r40 fields would propagate the
+        // NaN to the breakdown totals. Skip those cells.
+        if (!Number.isFinite(n.x) || !Number.isFinite(n.y) || !Number.isFinite(n.z)) continue;
         // Pressure term (unchanged from r38). Use fluid density at the
         // first fluid neighbour.
         const rhoFluid = solver.grid.rho[firstFluid];
