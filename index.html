@@ -317,7 +317,7 @@
       </div>
       <div class="control" style="margin:8px 0 4px;padding:6px 8px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px">
         <label style="display:flex;justify-content:space-between;align-items:baseline">
-          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">CdVsWindSpeed</span>
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);letter-spacing:0.3px">CdVsWindSpeed</span>
           <span style="display:flex;gap:6px;align-items:center">
             <span id="cd-plot-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">– pts</span>
             <button type="button" id="cd-plot-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear recorded Cd points">clear</button>
@@ -328,7 +328,7 @@
           <span>0</span><span>–</span>
         </div>
         <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">CdOverTime <span class="help" data-tip="r50: time-series of Cd (drag coefficient) at the current wind speed. Useful for visualising Karman vortex shedding — once the oscillating inflow is dialed in, the Cd oscillates at the Strouhal frequency and you should see a periodic waveform here. Rolling 10-second window; auto-scaled Y. The cyan line is the instantaneous Cd, the yellow band shows the current min–max range so you can see the oscillation envelope at a glance.">?</span></span>
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);letter-spacing:0.3px">CdOverTime <span class="help" data-tip="r50: time-series of Cd (drag coefficient) at the current wind speed. Useful for visualising Karman vortex shedding — once the oscillating inflow is dialed in, the Cd oscillates at the Strouhal frequency and you should see a periodic waveform here. Rolling 10-second window; auto-scaled Y. The cyan line is the instantaneous Cd, the yellow band shows the current min–max range so you can see the oscillation envelope at a glance.">?</span></span>
           <span style="display:flex;gap:6px;align-items:center">
             <span id="cd-strip-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">–</span>
             <button type="button" id="cd-strip-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear the Cd-time buffer">clear</button>
