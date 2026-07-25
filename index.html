@@ -5714,6 +5714,13 @@ async function main() {
   try {
     backend = await createComputeBackend(spec, forceCpu);
     window.__windsurfBackend = backend;
+    // r49: expose the pathline burst so external tests can inspect
+    // the particle count. Recomputed on every step so the count
+    // stays current.
+    Object.defineProperty(window.__windsurfBackend, 'pathlineBurst', {
+      get() { return pathlineBurst; },
+      configurable: true,
+    });
   } catch (e) {
     showError('Failed to create compute backend: ' + e.message);
     return;
