@@ -302,7 +302,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r53-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r54-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
         </details>
       </div>
       <div id="readout">
@@ -319,6 +319,20 @@
           <div id="drag-bar-p" style="background:#7ad7ff;width:100%;transition:width 120ms ease"></div>
           <div id="drag-bar-v" style="background:#ffb86b;width:0%;transition:width 120ms ease"></div>
         </div>
+      </div>
+      <!-- r54: frame budget selector. Caps the requestAnimationFrame rate
+           to save CPU when the user is on battery or doesn't need
+           60fps. Auto-pause kicks in when the tab goes background so
+           the sim stops burning CPU when nobody's watching. -->
+      <div class="control" style="display:flex;align-items:center;gap:8px;padding:0 0 6px">
+        <span class="lbl-text" style="flex:1;font-size:10px;color:var(--muted);letter-spacing:0.3px">FrameBudget</span>
+        <select id="frame-budget-select" style="font:inherit;font-size:11px;padding:3px 6px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer">
+          <option value="15">15 fps</option>
+          <option value="30">30 fps</option>
+          <option value="60">60 fps</option>
+          <option value="0">Uncapped</option>
+        </select>
+        <span id="frame-budget-status" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;min-width:80px;text-align:right">target 60</span>
       </div>
       <div class="control" style="margin:8px 0 4px;padding:6px 8px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px">
         <label style="display:flex;justify-content:space-between;align-items:baseline">
@@ -5374,6 +5388,34 @@ function registerTests(tr) {
     sel.dispatchEvent(new Event('change'));
     return min.includes('−') && max.includes('+');
   });
+  // r54: frame budget selector exists in the DOM with all four options.
+  tr.test('r54_frame_budget_dom_present', () => {
+    const sel = document.getElementById('frame-budget-select');
+    if (!sel) return false;
+    const opts = Array.from(sel.options).map(o => o.value).sort();
+    return JSON.stringify(opts) === JSON.stringify(['0', '15', '30', '60']);
+  });
+  // r54: applyFrameBudget sets frameBudgetHz and updates the status label.
+  tr.test('r54_frame_budget_set_hz', () => {
+    if (!window.__frameBudget) return false;
+    window.__frameBudget.applyFrameBudget(15);
+    const status = document.getElementById('frame-budget-status').textContent;
+    return status.includes('15') && window.__frameBudget.state.frameBudgetHz === 15;
+  });
+  // r54: visibility flag is exposed and default true.
+  tr.test('r54_visibility_default_true', () => {
+    if (!window.__frameBudget) return false;
+    return window.__frameBudget.state.visible === true;
+  });
+  // r54: change event updates frameBudgetHz from the select value.
+  tr.test('r54_frame_budget_select_change', () => {
+    const sel = document.getElementById('frame-budget-select');
+    if (!sel) return false;
+    sel.value = '30';
+    sel.dispatchEvent(new Event('change'));
+    const status = document.getElementById('frame-budget-status').textContent;
+    return status.includes('30');
+  });
 }
 
 /* =====================================================================
@@ -5966,6 +6008,20 @@ async function main() {
   let stepOnce = false;
   let simStepsPerFrame = parseInt(spfSlider.value, 10);
   let lastFrameTime = performance.now();
+
+  // r54: frame-budget throttle. `frameBudgetHz` is the target fps
+  // ceiling for the requestAnimationFrame loop. 0 = uncapped. The
+  // simulator's CPU work (backend.step()) runs each frame regardless,
+  // so we trade fluid-input latency for cycle savings on battery.
+  let frameBudgetHz = 0;          // default: uncapped (matches r53 behavior)
+  // r54: visibility-aware auto-pause. When the tab goes background we
+  // don't want the sim to keep burning CPU. We switch to a 4 Hz
+  // 'background tick' that keeps smoke / wake fresh without doing
+  // GPU readbacks every frame. When the tab comes back visible we
+  // resume normal cadence.
+  let visible = true;
+  let bgTickIntervalMs = 250;     // 4 Hz
+  let bgAccum = 0;
   let fps = 0;
   let simStepsThisSecond = 0;
   let simStepsPerSecond = 0;
@@ -6435,6 +6491,52 @@ async function main() {
   drawColorbar(fieldMode);
   // Expose for tests / external scripts.
   window.__colorbar = { drawColorbar, viridisJS, rdbuJS, COLORBAR_SPEC };
+
+  // r54: frame-budget selector. Default 60 fps for a snappy first
+  // impression; user can drop to 30 (battery) or 15 (laptop on a
+  // call) or Uncapped (max GPU).
+  const frameBudgetSelect = document.getElementById('frame-budget-select');
+  const frameBudgetStatus = document.getElementById('frame-budget-status');
+  const FRAME_BUDGET_LABELS = { 15: '15 fps low', 30: '30 fps ok', 60: '60 fps high', 0: 'uncapped' };
+  function applyFrameBudget(hz) {
+    frameBudgetHz = hz;
+    if (frameBudgetStatus) {
+      frameBudgetStatus.textContent = hz === 0 ? 'target ∞' : 'target ' + hz;
+    }
+  }
+  if (frameBudgetSelect) {
+    // Set to 60 by default — this is a deviation from "uncapped" but the
+    // first-time UX is much better at 60.
+    frameBudgetSelect.value = '60';
+    applyFrameBudget(60);
+    frameBudgetSelect.addEventListener('change', () => {
+      const hz = parseInt(frameBudgetSelect.value, 10);
+      applyFrameBudget(hz);
+      // Persist into URL hash for sharing.
+      const u = new URL(window.location.href);
+      if (hz === 60) u.hash = u.hash.replace(/[?&]fb=\d+/, '');
+      else u.hash += (u.hash.includes('fb=') ? '' : (u.hash ? '&' : '#')) + 'fb=' + hz;
+      history.replaceState(null, '', u.toString());
+    });
+  }
+
+  // r54: visibility-aware auto-pause. When the tab goes background, we
+  // (a) skip GPU readbacks/uploads (handled inside tick), and
+  // (b) run physics at 4 Hz instead of 60 to keep the wake realistic.
+  // When the tab returns, normal cadence resumes.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      visible = false;
+      lastBgTickMs = performance.now();
+      bgAccum = 0;
+    } else {
+      visible = true;
+      _frameBudgetState.lastTickMs = 0; // reset so we don't delay the resume frame
+    }
+  });
+
+  // r54: expose for tests.
+  window.__frameBudget = { applyFrameBudget, get state() { return { frameBudgetHz, visible }; } };
 
   // r44: slice plane toggle. The overlay is drawn every frame in the
   // render loop when enabled; no reset.
@@ -6995,6 +7097,35 @@ async function main() {
   // Main loop.
   function tick() {
     const t0 = performance.now();
+    // r54: frame-budget throttle. If frameBudgetHz > 0 and not enough
+    // time has passed since the last real frame, skip rendering and
+    // reschedule. requestAnimationFrame still fires at the display
+    // refresh rate, but we say 'no' and let the browser burn the
+    // gap on its other work. Keeps CPU/GPU cool on battery.
+    //
+    // visibility-aware path: when the tab is hidden, only run physics
+    // every bgTickIntervalMs (4 Hz) so the smoke doesn't go dead but
+    // we don't spin up GPU readbacks.
+    if (!visible) {
+      if (t0 - lastBgTickMs < bgTickIntervalMs) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      lastBgTickMs = t0;
+      // Inside the bg tick, step physics but skip GPU readbacks/uploads
+      // by setting a sentinel flag the rest of the function honors.
+      bgAccum++;
+    } else if (frameBudgetHz > 0) {
+      const minInterval = 1000 / frameBudgetHz;
+      const elapsed = t0 - _frameBudgetState.lastTickMs;
+      if (_frameBudgetState.lastTickMs > 0 && elapsed < minInterval) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      _frameBudgetState.lastTickMs = t0;
+    } else {
+      _frameBudgetState.lastTickMs = t0;
+    }
     const dt = t0 - lastFrameTime;
     lastFrameTime = t0;
     fps = fps * 0.9 + (1000 / Math.max(dt, 1)) * 0.1;
@@ -7099,7 +7230,10 @@ async function main() {
             densityStatsEl.textContent = `min=${mn.toFixed(2)} max=${mx.toFixed(2)} nonzero=${(nz/d.length*100).toFixed(0)}%`;
           }
         }
-      } else if (backend.readback) {
+      // r54: skip GPU readbacks when tab is hidden — there's nothing
+      // on the screen for them to feed. Physics still runs above so
+      // the wake stays coherent for when the user returns.
+      } else if (backend.readback && visible) {
         backend.readback().then(() => {
           const fMode = fieldMode; // capture current value at callback time
           let data = backend.densityCpu;
@@ -7127,7 +7261,8 @@ async function main() {
       // r38: WebGPU readback — kick off async readback of the smoke
       // buffer every frame. Cheap (~16KB), in parallel with the
       // density readback. _smokeReadback guards against overlap.
-      if (backend.readbackSmoke && smokeEnabled) {
+      // r54: skip smoke readbacks when the tab is hidden.
+      if (backend.readbackSmoke && smokeEnabled && visible) {
         backend.readbackSmoke().catch(() => { /* swallow — readback errors are non-fatal */ });
       }
       const aspect = canvas.clientWidth / canvas.clientHeight;
@@ -7218,9 +7353,11 @@ async function main() {
       console.error('Render error:', e);
     }
 
-    // Stats.
+    // Stats. r54: actual fps readout now shows both target and actual
+    // so the user can see how close the throttle is tracking.
     if (t0 - lastStatsT > 500) {
-      fpsEl.textContent = fps.toFixed(1);
+      const target = frameBudgetHz === 0 ? '∞' : String(frameBudgetHz);
+      fpsEl.textContent = fps.toFixed(1) + ' / ' + target;
       spsEl.textContent = simStepsPerSecond.toFixed(0);
       stepEl.textContent = backend.stepCount;
       spfEl.textContent = simStepsPerFrame;
