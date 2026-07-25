@@ -418,11 +418,11 @@
         <label><span class="lbl-text">SlicePlane <span class="help" data-tip="r44: 2D cross-section at y = ny/2 (mid-plane). Shows the density field (or the current colormap field) as a heatmap with quiver arrows for the (u, w) velocity components. Useful for verifying the wake structure without occlusion from the volumetric ray-march. Off by default. Quiver arrows update every step.">?</span></span><input type="checkbox" id="slice-enabled" style="margin-left:8px"></label>
       </div>
       <div class="control">
-        <label><span class="lbl-text">Smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
+        <label><span class="lbl-text">SmokeOpacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
         <input type="range" id="smoke-opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="control">
-        <label><span class="lbl-text">Smoke decay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
+        <label><span class="lbl-text">SmokeDecay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
         <input type="range" id="smoke-decay-slider" min="0.95" max="1.00" step="0.001" value="0.998">
       </div>
       <div class="control">
