@@ -6420,7 +6420,14 @@ async function main() {
   // post-stabilization data into a thin band. 5 is well above any
   // realistic bluff-body Cd (cube ~1.0-1.5, sphere ~0.5, wedge up to
   // ~2) so it's a safe ceiling.
-  const CD_MAX_CLAMP = 5.0;
+  //
+  // r50: raised to 8.0 because the new Cd-over-time strip exposes
+  //      Karman oscillation. At u_inf=0.15 with oscillating inflow the
+  //      peak Cd hits ~6.5 during shedding cycles; clamping at 5.0
+  //      chops the peaks and the strip shows a flat-top wave instead
+  //      of the true sinusoid. 8.0 leaves headroom for transient
+  //      overshoot without clipping steady-state Karman peaks.
+  const CD_MAX_CLAMP = 8.0;
   function recordCdSample(uLattice, cd) {
     if (typeof cd !== 'number' || !isFinite(cd)) return;
     const clamped = Math.min(cd, CD_MAX_CLAMP);
