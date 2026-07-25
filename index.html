@@ -299,7 +299,12 @@
         <h1>Windsurf</h1>
         <span id="backend-badge">Detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r51-2026-07-25 (cleaned UI: every label now in camelCase (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</span></div>
+      <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
+        <details id="build-tag-details">
+          <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r52-2026-07-25 (build tag collapsed by default. (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+        </details>
+      </div>
       <div id="readout">
         <div class="row"><span>Fps</span><span id="fps">–</span></div>
         <div class="row"><span>StepsPerSecond</span><span id="sps">–</span></div>
@@ -5287,6 +5292,28 @@ function registerTests(tr) {
     }
     return false;
   });
+  // r52: build tag is collapsible by default and expands on click.
+  //      Verify the source contains the <details>/<summary> markup
+  //      and the 'dev' chip text. The expansion logic is handled by
+  //      native HTML <details> + a Shift+D keydown handler.
+  tr.test('r52_build_tag_collapsed_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('id="build-tag-details"') &&
+             src.includes('id="build-tag-chip"') &&
+             src.includes('>dev</summary>');
+    }
+    return false;
+  });
+  // r52: Shift+D handler is wired in the keydown block.
+  tr.test('r52_build_tag_shift_d_handler_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes("e.shiftKey && (e.key === 'D' || e.key === 'd')") &&
+             src.includes("det.open = !det.open");
+    }
+    return false;
+  });
 }
 
 /* =====================================================================
@@ -6737,6 +6764,11 @@ async function main() {
     else if (e.key === '2') setPreset('side-on');
     else if (e.key === '3') setPreset('iso');
     else if (e.key === '4') setPreset('wake-view');
+    // r52: Shift+D toggles the build tag (dev breadcrumb).
+    else if (e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+      const det = document.getElementById('build-tag-details');
+      if (det) det.open = !det.open;
+    }
   });
 
   // r48: camera preset buttons. Each button calls setPreset(name) which
