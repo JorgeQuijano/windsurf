@@ -302,7 +302,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r52-2026-07-25 (build tag collapsed by default. (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r53-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
         </details>
       </div>
       <div id="readout">
@@ -418,6 +418,14 @@
           <option value="2">VorticityMagnitude</option>
           <option value="3">Pressure</option>
         </select>
+        <!-- r53: colorbar legend. Renders the colormap (viridis for
+             scalar fields, rdbu for signed pressure) below the field
+             selector so the user can read what the colors mean. The
+             min/max labels update with the chosen field mode. -->
+        <div id="colorbar-wrap" style="margin-top:6px">
+          <canvas id="colorbar-canvas" width="240" height="14" style="width:100%;height:14px;border-radius:3px;display:block"></canvas>
+          <div id="colorbar-labels" style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:2px;font-family:ui-monospace,monospace"><span id="colorbar-min">low</span><span id="colorbar-mid"></span><span id="colorbar-max">high</span></div>
+        </div>
       </div>
       <div class="control">
         <label><span class="lbl-text">SlicePlane <span class="help" data-tip="r44: 2D cross-section at y = ny/2 (mid-plane). Shows the density field (or the current colormap field) as a heatmap with quiver arrows for the (u, w) velocity components. Useful for verifying the wake structure without occlusion from the volumetric ray-march. Off by default. Quiver arrows update every step.">?</span></span><input type="checkbox" id="slice-enabled" style="margin-left:8px"></label>
@@ -5314,6 +5322,58 @@ function registerTests(tr) {
     }
     return false;
   });
+  // r53: colorbar canvas + min/max labels exist in the DOM.
+  tr.test('r53_colorbar_dom_present', () => {
+    const c = document.getElementById('colorbar-canvas');
+    return !!c && c.tagName === 'CANVAS' && c.width === 240 && c.height === 14 &&
+           !!document.getElementById('colorbar-min') &&
+           !!document.getElementById('colorbar-max');
+  });
+  // r53: viridis JS sample at t=0 and t=1 returns the bookend colors.
+  tr.test('r53_viridis_js_endpoints', () => {
+    if (!window.__colorbar) return false;
+    const lo = window.__colorbar.viridisJS(0);
+    const hi = window.__colorbar.viridisJS(1);
+    // lo should be deep purple (R, G small, B ~ 0.33); hi teal-green.
+    return Math.abs(lo[0] - 0.267) < 1e-3 && Math.abs(lo[2] - 0.329) < 1e-3 &&
+           Math.abs(hi[1] - 0.567) < 1e-3 && Math.abs(hi[2] - 0.551) < 1e-3;
+  });
+  // r53: rdbu JS sample at t=-1, 0, +1.
+  tr.test('r53_rdbu_js_endpoints', () => {
+    if (!window.__colorbar) return false;
+    const neg = window.__colorbar.rdbuJS(-1);
+    const mid = window.__colorbar.rdbuJS(0);
+    const pos = window.__colorbar.rdbuJS(1);
+    return Math.abs(neg[2] - 0.380) < 1e-3 &&  // deep blue, B dominant
+           Math.abs(mid[0] - 0.957) < 1e-3 &&  // near-white at 0
+           Math.abs(pos[0] - 0.700) < 1e-3;   // deep red, R dominant
+  });
+  // r53: drawColorbar populates the canvas pixels with non-gray colors.
+  tr.test('r53_colorbar_renders', () => {
+    if (!window.__colorbar) return false;
+    window.__colorbar.drawColorbar(0);
+    const c = document.getElementById('colorbar-canvas');
+    const cx = c.getContext('2d');
+    const px = cx.getImageData(20, 7, 1, 1).data;
+    const pxR = cx.getImageData(220, 7, 1, 1).data;
+    // Left side (density, low) — should be purple-ish. Right side — teal.
+    const notGray = px[0] !== px[1] || px[1] !== px[2];
+    const tealHasBlue = pxR[2] > 100;
+    return notGray && tealHasBlue;
+  });
+  // r53: field-mode change re-renders the colorbar (label update).
+  tr.test('r53_colorbar_redraws_on_fieldmode', () => {
+    if (!window.__colorbar) return false;
+    const sel = document.getElementById('field-mode-select');
+    if (!sel) return false;
+    sel.value = '3';
+    sel.dispatchEvent(new Event('change'));
+    const min = document.getElementById('colorbar-min').textContent;
+    const max = document.getElementById('colorbar-max').textContent;
+    sel.value = '0';
+    sel.dispatchEvent(new Event('change'));
+    return min.includes('−') && max.includes('+');
+  });
 }
 
 /* =====================================================================
@@ -6266,8 +6326,116 @@ async function main() {
   if (fieldModeSelect) {
     fieldModeSelect.addEventListener('change', () => {
       fieldMode = parseInt(fieldModeSelect.value, 10);
+      drawColorbar(fieldMode);
     });
   }
+
+  // r53: colormap legend for the volume field. Mirrors the GLSL viridis()
+  // and rdbu() functions so the user can read what each color encodes.
+  // The min/mid/max labels update with the chosen field mode. For
+  // signed pressure we render a diverging bar with a center=0 label.
+  const colorbarCanvas = document.getElementById('colorbar-canvas');
+  const colorbarMinEl = document.getElementById('colorbar-min');
+  const colorbarMidEl = document.getElementById('colorbar-mid');
+  const colorbarMaxEl = document.getElementById('colorbar-max');
+  const colorbarCtx = colorbarCanvas ? colorbarCanvas.getContext('2d') : null;
+
+  // 6-stop viridis (matches shaders/volume.glsl viridis()).
+  function viridisJS(t) {
+    t = Math.max(0, Math.min(1, t));
+    const stops = [
+      [0.267, 0.005, 0.329],
+      [0.282, 0.140, 0.457],
+      [0.254, 0.265, 0.530],
+      [0.207, 0.372, 0.553],
+      [0.164, 0.471, 0.558],
+      [0.128, 0.567, 0.551],
+    ];
+    const s = t * 5, i = Math.min(4, Math.floor(s));
+    const f = s - i;
+    const a = stops[i], b = stops[i + 1] || stops[i];
+    return [
+      a[0] + (b[0] - a[0]) * f,
+      a[1] + (b[1] - a[1]) * f,
+      a[2] + (b[2] - a[2]) * f,
+    ];
+  }
+  // 6-stop rdbu diverging (matches shaders/volume.glsl rdbu()).
+  function rdbuJS(t) {
+    t = Math.max(-1, Math.min(1, t));
+    const stops = [
+      [0.020, 0.188, 0.380],  // -1.0 deep blue
+      [0.129, 0.400, 0.674],  // -0.6
+      [0.557, 0.745, 0.847],  // -0.2 pale blue
+      [0.957, 0.957, 0.957],  // 0.0 white
+      [0.992, 0.682, 0.580],  // +0.4 light red
+      [0.700, 0.050, 0.150],  // +1.0 deep red
+    ];
+    const u = (t + 1) * 0.5;
+    const f = u * 5, i = Math.min(4, Math.floor(f));
+    const frac = f - i;
+    const a = stops[i], b = stops[i + 1] || stops[i];
+    return [
+      a[0] + (b[0] - a[0]) * frac,
+      a[1] + (b[1] - a[1]) * frac,
+      a[2] + (b[2] - a[2]) * frac,
+    ];
+  }
+  // r53: per-mode scale range, expressed in *physical* units that the
+  // user sees. The GLSL maps the physical value → d → alpha; here we
+  // just want a readable legend.
+  //
+  //   density:   density factor ρ ≈ 1 (ambient), wake builds to 1.02
+  //              visible as the cube's pressure buildup
+  //   velocity:  |u| in lattice units, 0 .. u_inf
+  //   vorticity: |ω| in lattice units (0 ≈ undisturbed, 0.05 ≈ peak)
+  //   pressure:  signed, units are cs²·(ρ − ρ₀). Domain is tiny —
+  //              show −1e-3..+1e-3 ish.
+  const COLORBAR_SPEC = {
+    0: { mode: 'viridis', lo: '1.000', mid: '', hi: '1.020', tip: 'density ρ (1 = ambient, cube buildup reaches ~1.02)' },
+    1: { mode: 'viridis', lo: '0.000', mid: '', hi: '0.150', tip: '|u| (lattice units, hi = current wind speed)' },
+    2: { mode: 'viridis', lo: '0.000', mid: '', hi: '0.050', tip: '|∇×u| (lattice units, hi ≈ cube shear-layer peak at default viscosity)' },
+    3: { mode: 'rdbu',    lo: '−1e-3', mid: '0', hi: '+1e-3', tip: 'pressure p = cs²·(ρ − ρ₀) (signed; blue = wake suction, red = stagnation)' },
+  };
+  function drawColorbar(mode) {
+    if (!colorbarCtx) return;
+    const w = colorbarCanvas.width;
+    const h = colorbarCanvas.height;
+    const spec = COLORBAR_SPEC[mode] || COLORBAR_SPEC[0];
+    colorbarMinEl.textContent = spec.lo;
+    colorbarMidEl.textContent = spec.mid;
+    colorbarMaxEl.textContent = spec.hi;
+    colorbarMinEl.title = spec.tip;
+    colorbarMidEl.title = spec.tip;
+    colorbarMaxEl.title = spec.tip;
+    const img = colorbarCtx.createImageData(w, h);
+    for (let x = 0; x < w; x++) {
+      let rgb;
+      if (spec.mode === 'rdbu') {
+        const t = -1 + 2 * (x / (w - 1));
+        rgb = rdbuJS(t);
+      } else {
+        // Viridis is currently gated to vT ∈ [0.30, 1.0] in the shader;
+        // mirror that so the legend matches what's on screen.
+        const t = 0.30 + 0.70 * (x / (w - 1));
+        rgb = viridisJS(t);
+      }
+      for (let y = 0; y < h; y++) {
+        const idx = (y * w + x) * 4;
+        img.data[idx + 0] = Math.round(rgb[0] * 255);
+        img.data[idx + 1] = Math.round(rgb[1] * 255);
+        img.data[idx + 2] = Math.round(rgb[2] * 255);
+        img.data[idx + 3] = 255;
+      }
+    }
+    colorbarCtx.putImageData(img, 0, 0);
+  }
+  // r53: draw once on load. Persisted via reload only — the field-mode
+  // is also stored in URL hash as &fm= for sharing, see r55+.
+  drawColorbar(fieldMode);
+  // Expose for tests / external scripts.
+  window.__colorbar = { drawColorbar, viridisJS, rdbuJS, COLORBAR_SPEC };
+
   // r44: slice plane toggle. The overlay is drawn every frame in the
   // render loop when enabled; no reset.
   const sliceToggle = document.getElementById('slice-enabled');
