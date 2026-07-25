@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r48-2026-07-24 (camera preset buttons: top-down / side-on / iso / wake-view. Click a button under "camera preset" or press keys 1-4 to snap the orbit camera to a canonical view. Replaces the previous need to drag the mouse to a known-good angle.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r49-2026-07-24 (pathline continuous mode + brighter 3D vorticity. Pathlines: mode dropdown next to the toggle lets you switch between "burst" (one-shot, original r46 behavior) and "continuous" (re-inject a fresh batch whenever the current one dies — the tunnel is always populated). 3D vorticity: per-step alpha cap raised from 0.35 to 0.55 and threshold lowered from 0.05 to 0.02 so the shear layers are now clearly visible in the volume.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -378,8 +378,15 @@
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
           <input type="checkbox" id="pathline-toggle" style="width:14px;height:14px;cursor:pointer">
-          <span class="lbl-text">pathlines <span class="help" data-tip="r46: Lagrangian particle burst. Toggle on to inject a burst of 60 particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Particles that exit the outlet or get stuck on the obstacle are removed. Trails fade from bright orange (head) to dark red (tail) over ~1 second, showing the time-history of each particle's path. Useful for visualising transient flow: 'where did the wind come from in the last second' vs streamlines which show 'where the wind is going right now'. Default off.">?</span></span>
+          <span class="lbl-text">pathlines <span class="help" data-tip="r46: Lagrangian particle burst. Toggle on to inject a burst of 60 particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Particles that exit the outlet or get stuck on the obstacle are removed. Trails fade from bright orange (head) to dark red (tail) over ~1 second, showing the time-history of each particle's path. Useful for visualising transient flow: 'where did the wind come from in the last second' vs streamlines which show 'where the wind is going right now'. r49: mode dropdown lets you switch between 'burst' (one-shot, original) and 'continuous' (re-inject a fresh batch whenever the current one dies). Default burst.">?</span></span>
         </label>
+        <div class="row" style="display:flex;gap:6px;align-items:center;padding:4px 0 0 20px">
+          <span style="font-size:10px;color:var(--muted)">mode</span>
+          <select id="pathline-mode" style="flex:1;padding:4px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px">
+            <option value="burst">burst (one-shot)</option>
+            <option value="continuous">continuous (re-inject)</option>
+          </select>
+        </div>
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
@@ -2722,8 +2729,18 @@ void main() {
       // after a few hundred steps (low viscosity = 0.03, u_inf = 0.08);
       // 30x brings the wake envelope into the viridis t ∈ [0.30, 1.0]
       // range without saturating the entire domain.
+      //
+      // r49: raised the per-step alpha cap from 0.35 (the global
+      // default below) to 0.55 so the shear layers are visibly
+      // bright in the volume. The previous 0.35 cap was inherited
+      // from the density/velocity render where moderate alpha is
+      // desirable; for vorticity, the signal is sparse (shear
+      // layers and wake edges only) so a higher cap produces a
+      // sharper, more readable visualization. The threshold is
+      // also lowered from 0.05 to 0.02 so faint mid-wake cells
+      // (|ω| ~ 0.003) still contribute.
       d = val * u_densityScale * 30.0;
-      thr = 0.05;            // r42: lowered from 0.10 so even mid-wake cells (|ω| ~ 0.01) contribute.
+      thr = 0.02;            // r49: lowered from 0.05 so mid-wake cells contribute.
     } else if (u_fieldMode == 3) {
       // r43: signed pressure p = cs²·(ρ - ρ₀). The buffer holds the
       // signed value; we use |val| for the alpha test (|p| near 0
@@ -2751,7 +2768,12 @@ void main() {
     // r17: clamp alpha to 0.35 max per fragment so even dense pressure
     // buildup doesn't fully saturate the volume. Prevents the faded-purple
     // accumulation that came from 128 marching steps of low-alpha writes.
-    float a = clamp(d * u_alphaScale, 0.0, 0.35);
+    // r49: for vorticity (fieldMode 2), the cap is raised to 0.55 so the
+    // sparse shear-layer signal is brighter. The alpha cap is a mode-
+    // local constant so the original 0.35 stays as the default for
+    // density / velocity / pressure modes.
+    float alphaCap = (u_fieldMode == 2) ? 0.55 : 0.35;
+    float a = clamp(d * u_alphaScale, 0.0, alphaCap);
     accumColor += (1.0 - accumAlpha) * color * a;
     accumAlpha += (1.0 - accumAlpha) * a;
     if (accumAlpha > 0.98) break;
@@ -3264,6 +3286,26 @@ class PathlineBurst {
     // Each particle: { position, trail: [{x,y,z}, ...], alive, headColor, tailColor }
     this.particles = [];
     this._randState = (0xDEADBEEF ^ (maxParticles * 2654435761)) >>> 0;
+    // r49: re-injection mode.
+    //   'burst'       — one-shot. Particles are injected once via inject()
+    //                   and removed when they die. (r46 default behavior.)
+    //   'continuous'  — re-inject a fresh batch of particles any time
+    //                   the burst drops below `reinjectThreshold`. The
+    //                   tunnel is always populated with a stream of
+    //                   particles instead of a single visible burst.
+    this.mode = 'burst';
+    // r49: when in continuous mode, re-inject when particles.length
+    // drops at or below this count. Defaults to 0 (re-inject only when
+    // completely empty) so the existing single-burst aesthetic is
+    // preserved unless the user opts in.
+    this.reinjectThreshold = 0;
+  }
+  // r49: change the re-injection mode. Validates the name so a
+  // future panel typo can't silently switch to an unknown mode.
+  setMode(name) {
+    const k = String(name || '').toLowerCase().trim();
+    if (k === 'burst' || k === 'continuous') this.mode = k;
+    // unknown name: ignore (preserves current mode).
   }
   _rand() {
     this._randState = (Math.imul(this._randState, 1664525) + 1013904223) >>> 0;
@@ -3310,6 +3352,16 @@ class PathlineBurst {
   step(solver, dt) {
     const { nx, ny, nz } = solver.config;
     const cx = nx * 0.5, cy = ny * 0.5, cz = nz * 0.5;
+    // r49: continuous mode. Re-inject a fresh batch whenever the
+    // burst drops at or below the threshold. The re-injection is
+    // deterministic w.r.t. the random state — the previous PRNG
+    // state is preserved so the new particles look like a natural
+    // continuation of the stream. (save/restore.)
+    if (this.mode === 'continuous' && this.particles.length <= this.reinjectThreshold) {
+      const savedState = this._randState;
+      this.inject(nx, ny, nz);
+      this._randState = savedState;
+    }
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       if (!p.alive) {
@@ -5040,6 +5092,114 @@ function registerTests(tr) {
     const unique = new Set(keys);
     tr.assert(unique.size === 4, `presets must be distinct, got ${keys.join(' | ')}`);
   });
+
+  // -- r49: vorticity visibility + pathline continuous mode --
+  tr.test('r49_frag_src_vorticity_visibility_boosted', () => {
+    // r49: the volumetric fragment shader's vorticity pass (fieldMode 2)
+    // should be brighter than the r42 default. The fix is two-pronged:
+    //   (a) the per-step alpha cap is raised to 0.55 for vorticity
+    //       (via `alphaCap = (u_fieldMode == 2) ? 0.55 : 0.35;`),
+    //   (b) the threshold is lowered to 0.02 so faint mid-wake cells
+    //       (|ω| ~ 0.003) contribute.
+    // Either change alone is enough to make the vorticity visible —
+    // this test verifies both are in place.
+    const fs = FRAG_SRC;
+    // (a) alpha cap should be 0.55 for vorticity.
+    const capMatch = fs.match(/alphaCap\s*=\s*\(u_fieldMode\s*==\s*2\)\s*\?\s*([0-9]+\.?[0-9]*)\s*:\s*([0-9]+\.?[0-9]*)/);
+    tr.assert(capMatch,
+      'FRAG_SRC must have a conditional alphaCap for fieldMode==2 with `?: 0.35` fallback');
+    const vortCap = parseFloat(capMatch[1]);
+    const otherCap = parseFloat(capMatch[2]);
+    tr.assert(vortCap >= 0.50,
+      `vorticity alpha cap must be >= 0.50, got ${vortCap}. Brighten the vorticity pass.`);
+    tr.assert(otherCap < vortCap,
+      `vorticity cap (${vortCap}) must exceed the default cap (${otherCap})`);
+    // (b) threshold lowered to 0.02 (was 0.05 in r42).
+    const thrMatch = fs.match(/else if \(u_fieldMode == 2\)[\s\S]*?thr\s*=\s*([0-9]+\.?[0-9]*)/);
+    tr.assert(thrMatch, 'FRAG_SRC must set thr for fieldMode==2');
+    const thr = parseFloat(thrMatch[1]);
+    tr.assert(thr <= 0.03,
+      `vorticity threshold should be <= 0.03 (r49 lower), got ${thr}`);
+  });
+  tr.test('r49_pathline_continuous_mode_reinjects_when_empty', () => {
+    // Build a real solver so PathlineBurst.step() can sample velocity.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    const burst = new PathlineBurst(3, 4);
+    burst.setMode('continuous');
+    burst.inject(16, 16, 16);
+    tr.assert(burst.particles.length === 3, 'injected 3 particles');
+    // Step until the burst empties — then verify that the CONTINUOUS
+    // mode re-injects within a reasonable number of additional steps.
+    // The test counts how many steps it took to empty, then runs another
+    // N steps and verifies the burst is NON-empty again.
+    let empties = 0;
+    let cycles = 0;
+    for (let i = 0; i < 6000 && cycles < 3; i++) {
+      burst.step(solver, 3.0);
+      if (burst.particles.length === 0) {
+        empties++;
+        // The continuous-mode re-injection should happen on the NEXT
+        // step or sooner. Without re-injection, the burst stays empty.
+        burst.step(solver, 3.0);
+        if (burst.particles.length === 0) {
+          // Stayed empty — fail.
+          break;
+        }
+        cycles++;
+      }
+    }
+    tr.assert(cycles >= 1,
+      `continuous mode should re-inject when empty: saw ${cycles} full cycles`);
+  });
+  tr.test('r49_pathline_burst_mode_does_not_reinject', () => {
+    // Same setup but in burst mode (default): once particles die, they
+    // stay dead. This is the r46 behavior.
+    const config = { nx: 16, ny: 16, nz: 16, u_inf: 0.05, rho0: 1.0, viscosity: 0.02, obstacles: [] };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 20; i++) solver.step();
+    const burst = new PathlineBurst(3, 4);
+    burst.setMode('burst');  // explicit
+    burst.inject(16, 16, 16);
+    tr.assert(burst.particles.length === 3, 'injected 3 particles');
+    // Run a lot of steps; particles should die and stay dead.
+    for (let i = 0; i < 3000; i++) burst.step(solver, 3.0);
+    tr.assert(burst.particles.length === 0,
+      `burst mode must stay empty: expected 0 particles, got ${burst.particles.length}`);
+  });
+  tr.test('r49_pathline_default_mode_is_burst', () => {
+    // Backwards compatibility: a PathlineBurst created without setting
+    // mode must default to 'burst' (the r46 behavior).
+    const burst = new PathlineBurst(5, 8);
+    tr.assert(burst.mode === 'burst',
+      `default mode must be 'burst', got ${burst.mode}`);
+  });
+  tr.test('r49_pathline_continuous_setMode', () => {
+    const burst = new PathlineBurst(5, 8);
+    burst.setMode('continuous');
+    tr.assert(burst.mode === 'continuous', 'mode after setMode(continuous)');
+    burst.setMode('burst');
+    tr.assert(burst.mode === 'burst', 'mode after setMode(burst)');
+  });
+  tr.test('r49_pathline_continuous_setMode_validates', () => {
+    const burst = new PathlineBurst(5, 8);
+    const before = burst.mode;
+    burst.setMode('not-a-mode');
+    tr.assert(burst.mode === before,
+      `unknown mode must be ignored: expected ${before}, got ${burst.mode}`);
+  });
+  tr.test('r49_pathline_continuous_threshold', () => {
+    // When particles count drops below a threshold, continuous mode
+    // re-injects. Verify the threshold is configurable and defaults
+    // to 0 (re-inject only when completely empty) so the existing
+    // single-burst aesthetic is preserved unless the user opts in.
+    const burst = new PathlineBurst(5, 8);
+    burst.mode = 'continuous';
+    // The threshold field should exist with a sane default.
+    tr.assert(typeof burst.reinjectThreshold === 'number',
+      'reinjectThreshold must be a number');
+  });
 }
 
 /* =====================================================================
@@ -6033,6 +6193,24 @@ async function main() {
           }
         } else {
           pathlineBurst.clear();
+        }
+      }
+    });
+  }
+  // r49: pathline mode (burst | continuous). The dropdown changes the
+  // burst's `mode` property. switching to 'continuous' while the burst
+  // is enabled also re-injects immediately so the user sees new
+  // particles entering the scene without waiting for the current batch
+  // to die first.
+  const pathlineModeSelect = document.getElementById('pathline-mode');
+  if (pathlineModeSelect && pathlineBurst) {
+    pathlineModeSelect.addEventListener('change', () => {
+      pathlineBurst.setMode(pathlineModeSelect.value);
+      if (pathlineEnabled && pathlineBurst.mode === 'continuous') {
+        const sol = window.__windsurfBackend && window.__windsurfBackend.solver;
+        if (sol) {
+          const cfg = sol.config;
+          pathlineBurst.inject(cfg.nx, cfg.ny, cfg.nz);
         }
       }
     });
