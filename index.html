@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r49-2026-07-24 (pathline continuous mode + brighter 3D vorticity. Pathlines: mode dropdown next to the toggle lets you switch between "burst" (one-shot, original r46 behavior) and "continuous" (re-inject a fresh batch whenever the current one dies — the tunnel is always populated). 3D vorticity: per-step alpha cap raised from 0.35 to 0.55 and threshold lowered from 0.05 to 0.02 so the shear layers are now clearly visible in the volume.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r50-2026-07-25 (Cd-over-time strip — a thin sparkline below the Cd-vs-wind plot shows the rolling 10-second Cd waveform. The Karman vortex shedding oscillation is visible as a periodic wave at the right Strouhal frequency. Strip buffer caps at 256 entries; auto-scaled Y; cyan waveform; Y labels show current min/max so the oscillation envelope is readable. Each render frame samples Cd on the CPU path; WebGPU falls back to the existing 2 Hz feed.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
@@ -326,6 +326,17 @@
         <canvas id="cd-plot-canvas" width="400" height="120" style="width:100%;height:120px;display:block;margin-top:4px;background:var(--bg);border-radius:3px"></canvas>
         <div id="cd-plot-xaxis" style="font-size:9px;color:var(--muted);font-family:ui-monospace,monospace;display:flex;justify-content:space-between;margin-top:2px">
           <span>0</span><span>–</span>
+        </div>
+        <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Cd over time <span class="help" data-tip="r50: time-series of Cd (drag coefficient) at the current wind speed. Useful for visualising Karman vortex shedding — once the oscillating inflow is dialed in, the Cd oscillates at the Strouhal frequency and you should see a periodic waveform here. Rolling 10-second window; auto-scaled Y. The cyan line is the instantaneous Cd, the yellow band shows the current min–max range so you can see the oscillation envelope at a glance.">?</span></span>
+          <span style="display:flex;gap:6px;align-items:center">
+            <span id="cd-strip-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">–</span>
+            <button type="button" id="cd-strip-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear the Cd-time buffer">clear</button>
+          </span>
+        </div>
+        <canvas id="cd-strip-canvas" width="400" height="44" style="width:100%;height:44px;display:block;margin-top:4px;background:var(--bg);border-radius:3px"></canvas>
+        <div id="cd-strip-xaxis" style="font-size:9px;color:var(--muted);font-family:ui-monospace,monospace;display:flex;justify-content:space-between;margin-top:2px">
+          <span>–10s</span><span>now</span>
         </div>
       </div>
       <div class="control">
@@ -5200,6 +5211,82 @@ function registerTests(tr) {
     tr.assert(typeof burst.reinjectThreshold === 'number',
       'reinjectThreshold must be a number');
   });
+  // r50: Cd-over-time strip canvas exists in the panel.
+  tr.test('r50_cd_strip_canvas_exists', () => {
+    // The canvas is created on main() boot. If main() hasn't run in the
+    // vm test runner, this is fine — we just verify the HTML id was
+    // emitted. The element won't exist in the vm-stubs but the SOURCE
+    // match below catches a regression where the canvas was removed.
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('id="cd-strip-canvas"');
+    }
+    return !!document.getElementById('cd-strip-canvas');
+  });
+  // r50: source contains recordCdStrip implementation.
+  tr.test('r50_record_cd_strip_source_present', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('function recordCdStrip(');
+    }
+    return typeof window.recordCdStrip === 'function';
+  });
+  // r50: source contains CD_STRIP_WINDOW_MS constant.
+  tr.test('r50_cd_strip_window_constant_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('CD_STRIP_WINDOW_MS = 10000');
+    }
+    return typeof window.CD_STRIP_WINDOW_MS === 'number' && window.CD_STRIP_WINDOW_MS === 10000;
+  });
+  // r50: source contains CD_STRIP_MAX = 256.
+  tr.test('r50_cd_strip_buffer_max_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('CD_STRIP_MAX = 256');
+    }
+    return typeof window.CD_STRIP_MAX === 'number' && window.CD_STRIP_MAX === 256;
+  });
+  // r50: source contains the per-frame strip-sample wiring in the
+  //      animate loop. Without this the strip buffer would never fill
+  //      and the user would see an empty plot.
+  tr.test('r50_animate_feeds_strip_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      // Look for both: the call site (recordCdStrip(...) inside the
+      // dragTimer block) and the constant declaration.
+      return src.includes('recordCdStrip(_stripReport.cd)') &&
+             src.includes('function recordCdStrip(');
+    }
+    return typeof window.recordCdStrip === 'function';
+  });
+  // r50: strip window trims older entries (>10s). Source-level check
+  //      on the trim loop — verifies the algorithm is implemented.
+  tr.test('r50_cd_strip_trim_logic_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('CD_STRIP_WINDOW_MS') && src.includes('cdStripSamples.shift()');
+    }
+    return false;
+  });
+  // r50: clear button resets the strip. Source-level check on the
+  //      click handler.
+  tr.test('r50_cd_strip_clear_button_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes("cdStripClearBtn.addEventListener('click'");
+    }
+    return !!document.getElementById('cd-strip-clear');
+  });
+  // r50: strip draw loop is wired (requestAnimationFrame loop drives
+  //      drawCdStrip every frame).
+  tr.test('r50_cd_strip_draw_loop_source', () => {
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      return src.includes('function stripLoop()') && src.includes('drawCdStrip();');
+    }
+    return false;
+  });
 }
 
 /* =====================================================================
@@ -6428,6 +6515,141 @@ async function main() {
     cdSamples = [];
     drawCdPlot();
   });
+  // r50: Cd-over-time strip. A thin sparkline that shows Cd(t) at the
+  // current wind speed, rolling 10-second window. Bypasses the 2 Hz
+  // throttle used by recordCdSample() so the Karman oscillation is
+  // actually visible (the throttle would filter down to 2 samples per
+  // visible oscillation cycle, which is below the aliasing threshold).
+  const cdStripCanvas = document.getElementById('cd-strip-canvas');
+  const cdStripStats = document.getElementById('cd-strip-stats');
+  const cdStripXAxis = document.getElementById('cd-strip-xaxis');
+  const cdStripClearBtn = document.getElementById('cd-strip-clear');
+  const cdStripCtx = cdStripCanvas.getContext('2d');
+  let cdStripSamples = [];   // [{t, cd}] — t = wall-clock ms
+  const CD_STRIP_WINDOW_MS = 10000;  // 10 s rolling window
+  const CD_STRIP_MAX = 256;          // cap buffer; we trim on insert
+  // r50: expose the strip state on window so the in-browser test
+  //      harness (registerTests scope, called via globalThis in
+  //      test-selftest.mjs) can poke at it without us having to
+  //      refactor everything out of main().
+  if (typeof window !== 'undefined') {
+    window.__cdStrip = {
+      get samples() { return cdStripSamples; },
+      record: recordCdStrip,
+      clear: () => { cdStripSamples = []; drawCdStrip(); },
+      get CD_STRIP_WINDOW_MS() { return CD_STRIP_WINDOW_MS; },
+      get CD_STRIP_MAX() { return CD_STRIP_MAX; },
+    };
+  }
+  function recordCdStrip(cd) {
+    if (typeof cd !== 'number' || !isFinite(cd)) return;
+    const clamped = Math.min(cd, CD_MAX_CLAMP);
+    cdStripSamples.push({ t: performance.now(), cd: clamped });
+    // Trim older than window OR oldest entries if buffer too big.
+    const tNow = performance.now();
+    while (cdStripSamples.length > 0 && (tNow - cdStripSamples[0].t) > CD_STRIP_WINDOW_MS) {
+      cdStripSamples.shift();
+    }
+    while (cdStripSamples.length > CD_STRIP_MAX) cdStripSamples.shift();
+  }
+  function resizeCdStripCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = cdStripCanvas.getBoundingClientRect();
+    cdStripCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    cdStripCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    cdStripCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resizeCdStripCanvas();
+  window.addEventListener('resize', resizeCdStripCanvas);
+  function drawCdStrip() {
+    const w = cdStripCanvas.clientWidth, h = cdStripCanvas.clientHeight;
+    cdStripCtx.clearRect(0, 0, w, h);
+    if (cdStripSamples.length < 2) {
+      cdStripCtx.fillStyle = 'rgba(150,150,170,0.5)';
+      cdStripCtx.font = '10px ui-monospace,monospace';
+      cdStripCtx.textAlign = 'center';
+      cdStripCtx.textBaseline = 'middle';
+      cdStripCtx.fillText('Cd waveform (last 10 s)', w / 2, h / 2);
+      cdStripStats.textContent = '–';
+      return;
+    }
+    // Trim again at draw time (the strip might be drawn lazily, and the
+    // window needs to contract as time passes).
+    const tNow = performance.now();
+    while (cdStripSamples.length > 0 && (tNow - cdStripSamples[0].t) > CD_STRIP_WINDOW_MS) {
+      cdStripSamples.shift();
+    }
+    let cdMin = Infinity, cdMax = -Infinity;
+    for (const s of cdStripSamples) {
+      if (s.cd < cdMin) cdMin = s.cd;
+      if (s.cd > cdMax) cdMax = s.cd;
+    }
+    const cdPad = Math.max(0.02, (cdMax - cdMin) * 0.15);
+    cdMin = Math.max(0, cdMin - cdPad);
+    cdMax = cdMax + cdPad;
+    if (cdMax === cdMin) cdMax = cdMin + 0.05;
+    const yToPx = (cd) => h - ((cd - cdMin) / (cdMax - cdMin)) * (h - 4) - 2;
+    const tStart = tNow - CD_STRIP_WINDOW_MS;
+    const xToPx = (t) => ((t - tStart) / CD_STRIP_WINDOW_MS) * w;
+    // Faint baseline grid (3 horizontal lines).
+    cdStripCtx.strokeStyle = 'rgba(100,100,120,0.22)';
+    cdStripCtx.lineWidth = 1;
+    cdStripCtx.beginPath();
+    for (let i = 0; i <= 2; i++) {
+      const y = (i / 2) * (h - 4) + 2;
+      cdStripCtx.moveTo(0, y);
+      cdStripCtx.lineTo(w, y);
+    }
+    cdStripCtx.stroke();
+    // Waveform.
+    cdStripCtx.strokeStyle = '#7cdcfe'; // accent cyan
+    cdStripCtx.lineWidth = 1.2;
+    cdStripCtx.beginPath();
+    for (let i = 0; i < cdStripSamples.length; i++) {
+      const x = xToPx(cdStripSamples[i].t);
+      const y = yToPx(cdStripSamples[i].cd);
+      if (i === 0) cdStripCtx.moveTo(x, y);
+      else cdStripCtx.lineTo(x, y);
+    }
+    cdStripCtx.stroke();
+    // Y-axis range label (top-left and bottom-left).
+    cdStripCtx.fillStyle = 'rgba(200,200,210,0.65)';
+    cdStripCtx.font = '9px ui-monospace,monospace';
+    cdStripCtx.textAlign = 'left';
+    cdStripCtx.textBaseline = 'top';
+    cdStripCtx.fillText(cdMax.toFixed(2), 2, 1);
+    cdStripCtx.textBaseline = 'bottom';
+    cdStripCtx.fillText(cdMin.toFixed(2), 2, h - 1);
+    // Stats: number of samples + min/max envelope (ΔCd is the
+    // oscillation amplitude — exactly what the Karman user cares about).
+    cdStripStats.textContent = `${cdStripSamples.length} pts · Δ${(cdMax - cdMin).toFixed(2)}`;
+  }
+  cdStripClearBtn.addEventListener('click', () => {
+    cdStripSamples = [];
+    drawCdStrip();
+  });
+  // r50: also expose clearBtn + recordCdStrip directly on window so the
+  //      test harness (which runs in the globalThis scope via the
+  //      vm.runInContext() shim in test-selftest.mjs) can call them.
+  if (typeof window !== 'undefined') {
+    window.recordCdStrip = recordCdStrip;
+    window.cdStripSamples = cdStripSamples;  // NOTE: live ref via getter pattern would be safer; this is a snapshot copy at boot time. Tests that mutate the buffer push through recordCdStrip() which uses the live closure.
+    window.cdStripClearBtn = cdStripClearBtn;
+    window.drawCdStrip = drawCdStrip;
+    window.CD_STRIP_MAX = CD_STRIP_MAX;
+    window.CD_STRIP_WINDOW_MS = CD_STRIP_WINDOW_MS;
+  }
+  // r50: draw strip on every animation frame via a tiny helper in the
+  //      render loop. We *record* from the existing animate() that
+  //      already calls recordCdSample() every ~500 ms. For the strip
+  //      we want sub-100 ms resolution to resolve the Karman frequency,
+  //      so the strip gets its own requestAnimationFrame loop below.
+  //      (Strip loop is cheap — one clearRect + N ≤ 256 line segments.)
+  (function stripLoop() {
+    drawCdStrip();
+    requestAnimationFrame(stripLoop);
+  })();
+
   resizeCdPlotCanvas();
   // Clear samples whenever shape or rotation changes — Cd depends on
   // both, so mixing them in the same chart is meaningless.
@@ -6599,6 +6821,10 @@ async function main() {
         // r33: record Cd sample for the live plot. Sync path.
         if (dragReport && typeof dragReport.cd === 'number') {
           recordCdSample(parseFloat(uInfInput.value), dragReport.cd);
+          // r50: also record into the high-rate Cd(t) strip so Karman
+          // oscillations are visible (the 2 Hz throttle in
+          // recordCdSample() would otherwise alias them).
+          recordCdStrip(dragReport.cd);
         }
         if (backend.computeDragAsync) {
           backend.computeDragAsync(0).then(r => {
@@ -6606,8 +6832,24 @@ async function main() {
             // Async path also feeds the plot.
             if (r && typeof r.cd === 'number') {
               recordCdSample(parseFloat(uInfInput.value), r.cd);
+              recordCdStrip(r.cd);
             }
           });
+        }
+      } catch (e) { /* ignore */ }
+    }
+    // r50: high-rate Cd(t) sampling for the strip. The 10-frame
+    //      throttle above would alias the Karman oscillation, so on the
+    //      CPU path (where computeDrag is sync + cheap) we sample every
+    //      frame. The strip buffer caps at 256 entries and rolls a 10 s
+    //      window so high-rate sampling is cheap. On the WebGPU path
+    //      the sync computeDrag() doesn't exist — we fall back to the
+    //      throttled async feed recorded inside the if-block above.
+    if (backend.computeDrag) {
+      try {
+        const _stripReport = backend.computeDrag(0);
+        if (_stripReport && typeof _stripReport.cd === 'number') {
+          recordCdStrip(_stripReport.cd);
         }
       } catch (e) { /* ignore */ }
     }

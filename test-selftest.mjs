@@ -173,6 +173,12 @@ const ctx = vm.createContext({
   Math, Float32Array, Uint8Array, Uint32Array, Int32Array, Array, Object, JSON, Error,
   Promise: globalThis.Promise,
 });
+// r50: expose the source string to the script for source-level test
+//      checks (variables inside main()'s closure are not visible from
+//      the test scope, so we verify the implementation is present in
+//      the source rather than running it).
+ctx.__getSource = () => html;
+ctx.globalThis = ctx;
 // Suppress WebGPU creation attempts and append a global hook so the test
 // harness can grab references from outside the IIFE-like scope.
 const source = m[1]
