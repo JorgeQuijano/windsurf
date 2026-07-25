@@ -296,20 +296,20 @@
     <canvas id="slice-canvas" style="position:absolute;left:12px;top:88px;width:300px;height:300px;background:rgba(8,10,18,0.85);border:1px solid rgba(255,255,255,0.18);border-radius:4px;display:none;pointer-events:none"></canvas>
     <aside id="panel">
       <header>
-        <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
-        <span id="backend-badge">detecting…</span>
+        <h1>Windsurf</h1>
+        <span id="backend-badge">Detecting…</span>
       </header>
       <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r50-2026-07-25 (Cd-over-time strip — a thin sparkline below the Cd-vs-wind plot shows the rolling 10-second Cd waveform. The Karman vortex shedding oscillation is visible as a periodic wave at the right Strouhal frequency. Strip buffer caps at 256 entries; auto-scaled Y; cyan waveform; Y labels show current min/max so the oscillation envelope is readable. Each render frame samples Cd on the CPU path; WebGPU falls back to the existing 2 Hz feed. CD_MAX_CLAMP raised 5.0→8.0 so Karman peaks aren't clipped.)</span></div>
       <div id="readout">
-        <div class="row"><span>FPS</span><span id="fps">–</span></div>
-        <div class="row"><span>steps/s</span><span id="sps">–</span></div>
-        <div class="row"><span>step</span><span id="step">0</span></div>
-        <div class="row"><span>sim steps/frame</span><span id="spf">0</span></div>
-        <div class="row"><span>density</span><span id="density-stats" style="font-family:ui-monospace,monospace;font-size:11px">–</span></div>
+        <div class="row"><span>Fps</span><span id="fps">–</span></div>
+        <div class="row"><span>StepsPerSecond</span><span id="sps">–</span></div>
+        <div class="row"><span>Step</span><span id="step">0</span></div>
+        <div class="row"><span>StepsPerFrame</span><span id="spf">0</span></div>
+        <div class="row"><span>Density</span><span id="density-stats" style="font-family:ui-monospace,monospace;font-size:11px">–</span></div>
         <div class="row"><span>Cd</span><span id="cd">–</span></div>
-        <div class="row"><span>F_x</span><span id="fx" style="font-weight:600">–</span></div>
-        <div class="row" style="padding-left:12px;font-size:11px"><span>F_p (pressure)</span><span id="fxp" style="color:#7ad7ff">–</span></div>
-        <div class="row" style="padding-left:12px;font-size:11px"><span>F_v (viscous)</span><span id="fxv" style="color:#ffb86b">–</span></div>
+        <div class="row"><span>Fx</span><span id="fx" style="font-weight:600">–</span></div>
+        <div class="row" style="padding-left:12px;font-size:11px"><span>PressureForce</span><span id="fxp" style="color:#7ad7ff">–</span></div>
+        <div class="row" style="padding-left:12px;font-size:11px"><span>ViscousForce</span><span id="fxv" style="color:#ffb86b">–</span></div>
         <div id="drag-bar" style="height:6px;border-radius:3px;background:var(--panel-2);overflow:hidden;margin:4px 0 8px;display:flex;border:1px solid var(--border)" title="drag composition: pressure (cyan) vs viscous (orange)">
           <div id="drag-bar-p" style="background:#7ad7ff;width:100%;transition:width 120ms ease"></div>
           <div id="drag-bar-v" style="background:#ffb86b;width:0%;transition:width 120ms ease"></div>
@@ -317,7 +317,7 @@
       </div>
       <div class="control" style="margin:8px 0 4px;padding:6px 8px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px">
         <label style="display:flex;justify-content:space-between;align-items:baseline">
-          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Cd vs wind speed</span>
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">CdVsWindSpeed</span>
           <span style="display:flex;gap:6px;align-items:center">
             <span id="cd-plot-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">– pts</span>
             <button type="button" id="cd-plot-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear recorded Cd points">clear</button>
@@ -328,7 +328,7 @@
           <span>0</span><span>–</span>
         </div>
         <div class="row" style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Cd over time <span class="help" data-tip="r50: time-series of Cd (drag coefficient) at the current wind speed. Useful for visualising Karman vortex shedding — once the oscillating inflow is dialed in, the Cd oscillates at the Strouhal frequency and you should see a periodic waveform here. Rolling 10-second window; auto-scaled Y. The cyan line is the instantaneous Cd, the yellow band shows the current min–max range so you can see the oscillation envelope at a glance.">?</span></span>
+          <span class="lbl-text" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">CdOverTime <span class="help" data-tip="r50: time-series of Cd (drag coefficient) at the current wind speed. Useful for visualising Karman vortex shedding — once the oscillating inflow is dialed in, the Cd oscillates at the Strouhal frequency and you should see a periodic waveform here. Rolling 10-second window; auto-scaled Y. The cyan line is the instantaneous Cd, the yellow band shows the current min–max range so you can see the oscillation envelope at a glance.">?</span></span>
           <span style="display:flex;gap:6px;align-items:center">
             <span id="cd-strip-stats" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace">–</span>
             <button type="button" id="cd-strip-clear" style="font-size:10px;padding:1px 6px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-family:inherit" title="Clear the Cd-time buffer">clear</button>
@@ -340,155 +340,155 @@
         </div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">wind speed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. Toggle below for display units: lattice (raw LBM value), km/h, mph, knots. Mapping is a display convention — LBM has no intrinsic SI units, so we set 1 lattice unit = 500 km/h = 310 mph = 270 knots (picked so the default 0.08 lattice reads as ~40 km/h, a typical low-speed tunnel feel). Slider range 0.02..0.60 lattice = 10..300 km/h, step 0.005 = 2.5 km/h. Empirically the solver stays stable up to ~200 km/h (u ≈ 0.40 lattice, Mach 0.69); above that the wake develops spurious shocks and Cd diverges to 10²⁰. The 'sim unstable' badge fires there.">?</span></span><span id="u-inf-val">40 km/h</span><span id="u-inf-warn" style="display:none;color:#ffaa44;font-size:10px;margin-left:6px" title="LBM becomes unstable above ~200 km/h (Mach 0.69). Cd/F_x values shown here are numerical artifacts, not physical.">⚠ sim unstable</span></label>
+        <label><span class="lbl-text">WindSpeed <span class="help" data-tip="Free-stream wind speed (u∞). Higher = faster air entering the tunnel, more drag on the artifact, more cyan streamlines turn red. Lower = slower flow, easier to see streamline deflection around the cube. Toggle below for display units: lattice (raw LBM value), km/h, mph, knots. Mapping is a display convention — LBM has no intrinsic SI units, so we set 1 lattice unit = 500 km/h = 310 mph = 270 knots (picked so the default 0.08 lattice reads as ~40 km/h, a typical low-speed tunnel feel). Slider range 0.02..0.60 lattice = 10..300 km/h, step 0.005 = 2.5 km/h. Empirically the solver stays stable up to ~200 km/h (u ≈ 0.40 lattice, Mach 0.69); above that the wake develops spurious shocks and Cd diverges to 10²⁰. The 'sim unstable' badge fires there.">?</span></span><span id="u-inf-val">40 km/h</span><span id="u-inf-warn" style="display:none;color:#ffaa44;font-size:10px;margin-left:6px" title="LBM becomes unstable above ~200 km/h (Mach 0.69). Cd/F_x values shown here are numerical artifacts, not physical.">⚠ sim unstable</span></label>
         <input type="range" id="u-inf" min="0.02" max="0.60" step="0.005" value="0.08">
         <div class="seg unit-toggle" id="u-inf-unit-toggle" style="margin-top:6px">
-          <button type="button" class="seg-btn" data-unit="lattice">lattice</button>
-          <button type="button" class="seg-btn active" data-unit="kmh">km/h</button>
-          <button type="button" class="seg-btn" data-unit="mph">mph</button>
-          <button type="button" class="seg-btn" data-unit="knots">knots</button>
+          <button type="button" class="seg-btn" data-unit="lattice">Lattice</button>
+          <button type="button" class="seg-btn active" data-unit="kmh">KmH</button>
+          <button type="button" class="seg-btn" data-unit="mph">Mph</button>
+          <button type="button" class="seg-btn" data-unit="knots">Knots</button>
         </div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">air viscosity <span class="help" data-tip="Kinematic viscosity ν (nu). Controls how 'thick' the air behaves. Lower = thin air, streamlines flow right past the cube. Higher = thick air, more turbulence and wake separation behind the cube. Default 0.030 is roughly air at room temperature.">?</span></span><span id="visc-val">0.030</span></label>
+        <label><span class="lbl-text">AirViscosity <span class="help" data-tip="Kinematic viscosity ν (nu). Controls how 'thick' the air behaves. Lower = thin air, streamlines flow right past the cube. Higher = thick air, more turbulence and wake separation behind the cube. Default 0.030 is roughly air at room temperature.">?</span></span><span id="visc-val">0.030</span></label>
         <input type="range" id="visc" min="0.005" max="0.10" step="0.005" value="0.030">
       </div>
       <div class="control">
-        <label><span class="lbl-text">streamlines <span class="help" data-tip="How many streamlines to draw. Each streamline is a trail of dots showing the path one parcel of air follows through the tunnel. More streamlines = denser flow visualization but slower FPS. The color of each trail point encodes its speed (cyan=fast, red=slow/high drag).">?</span></span><span id="streamline-count-val">80</span></label>
+        <label><span class="lbl-text">Streamlines <span class="help" data-tip="How many streamlines to draw. Each streamline is a trail of dots showing the path one parcel of air follows through the tunnel. More streamlines = denser flow visualization but slower FPS. The color of each trail point encodes its speed (cyan=fast, red=slow/high drag).">?</span></span><span id="streamline-count-val">80</span></label>
         <input type="range" id="streamline-count" min="10" max="400" step="10" value="80">
       </div>
       <div class="control trail-mode-control">
-        <label><span class="lbl-text">trail mode <span class="help" data-tip="Burst (default): trails show only the recent 96 points and disappear when the particle exits the tunnel. Permanent: every completed inlet→outlet path stays visible as a frozen line, so you can see where the wind FINISHED. Capped at 200 frozen trails (oldest are removed first). Toggling between modes is seamless in r37 — the active trails are kept live and (on burst→permanent) snapped into frozenTrails so the tunnel looks full the moment you click, not 5 seconds later.">?</span></span><span id="trail-mode-val">burst</span></label>
+        <label><span class="lbl-text">TrailMode <span class="help" data-tip="Burst (default): trails show only the recent 96 points and disappear when the particle exits the tunnel. Permanent: every completed inlet→outlet path stays visible as a frozen line, so you can see where the wind FINISHED. Capped at 200 frozen trails (oldest are removed first). Toggling between modes is seamless in r37 — the active trails are kept live and (on burst→permanent) snapped into frozenTrails so the tunnel looks full the moment you click, not 5 seconds later.">?</span></span><span id="trail-mode-val">burst</span></label>
         <div class="seg">
-          <button type="button" class="seg-btn active" data-mode="burst">burst</button>
-          <button type="button" class="seg-btn" data-mode="permanent">permanent</button>
+          <button type="button" class="seg-btn active" data-mode="burst">Burst</button>
+          <button type="button" class="seg-btn" data-mode="permanent">Permanent</button>
         </div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">sim steps/frame <span class="help" data-tip="How many simulation time-steps to run per rendered frame. 0 = paused (visual only), 1 = realtime speed, higher = fast-forward. Higher values make the simulation converge faster but use more CPU per frame.">?</span></span><span id="spf-val">1</span></label>
+        <label><span class="lbl-text">StepsPerFrame <span class="help" data-tip="How many simulation time-steps to run per rendered frame. 0 = paused (visual only), 1 = realtime speed, higher = fast-forward. Higher values make the simulation converge faster but use more CPU per frame.">?</span></span><span id="spf-val">1</span></label>
         <input type="range" id="spf-slider" min="0" max="20" step="1" value="1">
       </div>
       <div class="control">
-        <label><span class="lbl-text">artifact opacity <span class="help" data-tip="How opaque the cube artifact is. 100% = solid white cube (default, no transparency). 0% = completely invisible, only the streamlines remain. Mid values let you see streamlines passing through/around the cube.">?</span></span><span id="opacity-val">100%</span></label>
+        <label><span class="lbl-text">BodyOpacity <span class="help" data-tip="How opaque the cube artifact is. 100% = solid white cube (default, no transparency). 0% = completely invisible, only the streamlines remain. Mid values let you see streamlines passing through/around the cube.">?</span></span><span id="opacity-val">100%</span></label>
         <input type="range" id="opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="control">
-        <label><span class="lbl-text">streamline opacity <span class="help" data-tip="How opaque the wind streamlines are. 100% = vivid flow visualization (default). 50% = subtle tracer that lets the volumetric density underneath show through. 0% = invisible streamlines, only the volumetric pressure field remains. Useful for decluttering when you have many streamlines or want to focus on the colormap.">?</span></span><span id="stream-opacity-val">100%</span></label>
+        <label><span class="lbl-text">StreamlineOpacity <span class="help" data-tip="How opaque the wind streamlines are. 100% = vivid flow visualization (default). 50% = subtle tracer that lets the volumetric density underneath show through. 0% = invisible streamlines, only the volumetric pressure field remains. Useful for decluttering when you have many streamlines or want to focus on the colormap.">?</span></span><span id="stream-opacity-val">100%</span></label>
         <input type="range" id="stream-opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
           <input type="checkbox" id="ribbon-toggle" style="width:14px;height:14px;cursor:pointer">
-          <span class="lbl-text">ribbon mode <span class="help" data-tip="r45: render streamlines as ribbons (flat strips with width) instead of 1D lines. Each ribbon is billboarded to face the camera — at any orbit angle the ribbon shows its full width. Width is controlled by the 'ribbon width' slider. Useful for visualising flow direction over distance: a wide ribbon means slow flow, a narrow one means fast. Per-trail velocity is still colored (slow = red, fast = cyan) so speed is visible in the color gradient along the ribbon. Off by default to keep the line-style streamlines.">?</span></span>
+          <span class="lbl-text">RibbonMode <span class="help" data-tip="r45: render streamlines as ribbons (flat strips with width) instead of 1D lines. Each ribbon is billboarded to face the camera — at any orbit angle the ribbon shows its full width. Width is controlled by the 'ribbon width' slider. Useful for visualising flow direction over distance: a wide ribbon means slow flow, a narrow one means fast. Per-trail velocity is still colored (slow = red, fast = cyan) so speed is visible in the color gradient along the ribbon. Off by default to keep the line-style streamlines.">?</span></span>
         </label>
       </div>
       <div class="control">
-        <label><span class="lbl-text">ribbon width <span class="help" data-tip="r45: ribbon half-width in lattice units. The full width is 2x this value, applied perpendicular to the flow tangent and billboarded to face the camera. 0.3 = subtle ribbon (default-ish, doesn't occlude the volumetric). 1.0 = prominent ribbon (more visible, may occlude the wake). 2.0+ = very wide (best for highlighting the flow direction over distance).">?</span></span><span id="ribbon-width-val">0.30</span></label>
+        <label><span class="lbl-text">RibbonWidth <span class="help" data-tip="r45: ribbon half-width in lattice units. The full width is 2x this value, applied perpendicular to the flow tangent and billboarded to face the camera. 0.3 = subtle ribbon (default-ish, doesn't occlude the volumetric). 1.0 = prominent ribbon (more visible, may occlude the wake). 2.0+ = very wide (best for highlighting the flow direction over distance).">?</span></span><span id="ribbon-width-val">0.30</span></label>
         <input type="range" id="ribbon-width-slider" min="0.1" max="2.0" step="0.05" value="0.30">
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
           <input type="checkbox" id="pathline-toggle" style="width:14px;height:14px;cursor:pointer">
-          <span class="lbl-text">pathlines <span class="help" data-tip="r46: Lagrangian particle burst. Toggle on to inject a burst of 60 particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Particles that exit the outlet or get stuck on the obstacle are removed. Trails fade from bright orange (head) to dark red (tail) over ~1 second, showing the time-history of each particle's path. Useful for visualising transient flow: 'where did the wind come from in the last second' vs streamlines which show 'where the wind is going right now'. r49: mode dropdown lets you switch between 'burst' (one-shot, original) and 'continuous' (re-inject a fresh batch whenever the current one dies). Default burst.">?</span></span>
+          <span class="lbl-text">Pathlines <span class="help" data-tip="r46: Lagrangian particle burst. Toggle on to inject a burst of 60 particles at the inlet. Each particle advects through the scene (RK2 in the velocity field) and leaves a fading trail behind it. Particles that exit the outlet or get stuck on the obstacle are removed. Trails fade from bright orange (head) to dark red (tail) over ~1 second, showing the time-history of each particle's path. Useful for visualising transient flow: 'where did the wind come from in the last second' vs streamlines which show 'where the wind is going right now'. r49: mode dropdown lets you switch between 'burst' (one-shot, original) and 'continuous' (re-inject a fresh batch whenever the current one dies). Default burst.">?</span></span>
         </label>
         <div class="row" style="display:flex;gap:6px;align-items:center;padding:4px 0 0 20px">
-          <span style="font-size:10px;color:var(--muted)">mode</span>
+          <span style="font-size:10px;color:var(--muted)">Mode</span>
           <select id="pathline-mode" style="flex:1;padding:4px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px">
-            <option value="burst">burst (one-shot)</option>
-            <option value="continuous">continuous (re-inject)</option>
+            <option value="burst">Burst</option>
+            <option value="continuous">Continuous</option>
           </select>
         </div>
       </div>
       <div class="control">
         <label style="display:flex;align-items:center;gap:6px">
           <input type="checkbox" id="smoke-toggle" checked style="width:14px;height:14px;cursor:pointer">
-          <span class="lbl-text">smoke <span class="help" data-tip="Passive scalar (smoke) layer. Injected at the inlet (=1) and advected by the velocity field, with slow per-step decay. Rendered as a darker viridis (dark purple/blue) volumetric layer UNDER the density viridis. Much more intuitive than streamlines alone for showing flow recirculation, vortex shedding, and wake separation behind the artifact. Zero cost when off (the second ray-march pass is gated). Smoke values cluster in [0, 0.5] in steady state; the visible range is 0.05..0.5 mapped onto viridis t = 0.0..0.30.">?</span></span>
+          <span class="lbl-text">Smoke <span class="help" data-tip="Passive scalar (smoke) layer. Injected at the inlet (=1) and advected by the velocity field, with slow per-step decay. Rendered as a darker viridis (dark purple/blue) volumetric layer UNDER the density viridis. Much more intuitive than streamlines alone for showing flow recirculation, vortex shedding, and wake separation behind the artifact. Zero cost when off (the second ray-march pass is gated). Smoke values cluster in [0, 0.5] in steady state; the visible range is 0.05..0.5 mapped onto viridis t = 0.0..0.30.">?</span></span>
         </label>
       </div>
       <div class="control">
-        <label><span class="lbl-text">colormap field <span class="help" data-tip="r42: Choose which scalar field drives the volumetric ray-march colormap. Density (default) = pressure buildup (cs²·(ρ-ρ0)) around the obstacle. Velocity = velocity magnitude |u| — shows acceleration around the artifact. Vorticity = |∇×u| — highlights shear layers and vortex shedding in the wake; the most visually striking colormap for wake-dominated flows (cube, sphere, cylinder). Pressure = signed pressure (red = compression, blue = expansion). Zero cost when the field is changed — the field is always computed, only the colormap mapping changes.">?</span></span></label>
+        <label><span class="lbl-text">VolumeField <span class="help" data-tip="r42: Choose which scalar field drives the volumetric ray-march colormap. Density (default) = pressure buildup (cs²·(ρ-ρ0)) around the obstacle. Velocity = velocity magnitude |u| — shows acceleration around the artifact. Vorticity = |∇×u| — highlights shear layers and vortex shedding in the wake; the most visually striking colormap for wake-dominated flows (cube, sphere, cylinder). Pressure = signed pressure (red = compression, blue = expansion). Zero cost when the field is changed — the field is always computed, only the colormap mapping changes.">?</span></span></label>
         <select id="field-mode-select" style="width:100%;padding:4px;background:rgba(255,255,255,0.06);color:#eee;border:1px solid rgba(255,255,255,0.18);border-radius:4px;font:inherit">
-          <option value="0">density (pressure buildup)</option>
-          <option value="1">velocity magnitude</option>
-          <option value="2">vorticity magnitude |∇×u|</option>
-          <option value="3">pressure (signed)</option>
+          <option value="0">Density</option>
+          <option value="1">VelocityMagnitude</option>
+          <option value="2">VorticityMagnitude</option>
+          <option value="3">Pressure</option>
         </select>
       </div>
       <div class="control">
-        <label><span class="lbl-text">slice plane <span class="help" data-tip="r44: 2D cross-section at y = ny/2 (mid-plane). Shows the density field (or the current colormap field) as a heatmap with quiver arrows for the (u, w) velocity components. Useful for verifying the wake structure without occlusion from the volumetric ray-march. Off by default. Quiver arrows update every step.">?</span></span><input type="checkbox" id="slice-enabled" style="margin-left:8px"></label>
+        <label><span class="lbl-text">SlicePlane <span class="help" data-tip="r44: 2D cross-section at y = ny/2 (mid-plane). Shows the density field (or the current colormap field) as a heatmap with quiver arrows for the (u, w) velocity components. Useful for verifying the wake structure without occlusion from the volumetric ray-march. Off by default. Quiver arrows update every step.">?</span></span><input type="checkbox" id="slice-enabled" style="margin-left:8px"></label>
       </div>
       <div class="control">
-        <label><span class="lbl-text">smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
+        <label><span class="lbl-text">Smoke opacity <span class="help" data-tip="Master opacity of the smoke layer. 100% = full strength. 50% = subtle haze in the wake. 0% = invisible but the field is still being computed. Combined with the per-step alpha cap of 0.25 in the shader to keep the layer from saturating the volume.">?</span></span><span id="smoke-opacity-val">100%</span></label>
         <input type="range" id="smoke-opacity-slider" min="0" max="100" step="1" value="100">
       </div>
       <div class="control">
-        <label><span class="lbl-text">smoke decay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
+        <label><span class="lbl-text">Smoke decay <span class="help" data-tip="Per-step multiplicative decay on the smoke field. 1.000 = no decay (smoke accumulates forever — can wash out the wake). 0.998 = default; smoke reaches 1/e in ~500 steps and the wake shows a clean plume. 0.99 = smoke vanishes almost immediately (use for very fast/slow flows). Slider step 0.001 for fine control.">?</span></span><span id="smoke-decay-val">0.998</span></label>
         <input type="range" id="smoke-decay-slider" min="0.95" max="1.00" step="0.001" value="0.998">
       </div>
       <div class="control">
-        <label><span class="lbl-text">Smagorinsky C_s <span class="help" data-tip="r39: Smagorinsky LES turbulence model. Eddy-viscosity ν_t = (C_s · Δ)² · |S| where |S| is the local strain-rate magnitude. Effective per-cell viscosity becomes ν_lam + ν_t. 0.00 = pure laminar (r38 behavior, all wakes smooth). 0.10 = mild LES, wakes slightly textured. 0.16 = standard Smagorinsky, good general-purpose default. 0.20 = strong LES, very heavy damping of small eddies (useful for very high-Re flows). At C_s=0 the Smagorinsky pass is skipped entirely (zero cost).">?</span></span><span id="smag-cs-val">0.00</span></label>
+        <label><span class="lbl-text">SmagorinskyCoefficient <span class="help" data-tip="r39: Smagorinsky LES turbulence model. Eddy-viscosity ν_t = (C_s · Δ)² · |S| where |S| is the local strain-rate magnitude. Effective per-cell viscosity becomes ν_lam + ν_t. 0.00 = pure laminar (r38 behavior, all wakes smooth). 0.10 = mild LES, wakes slightly textured. 0.16 = standard Smagorinsky, good general-purpose default. 0.20 = strong LES, very heavy damping of small eddies (useful for very high-Re flows). At C_s=0 the Smagorinsky pass is skipped entirely (zero cost).">?</span></span><span id="smag-cs-val">0.00</span></label>
         <input type="range" id="smag-cs-slider" min="0.00" max="0.20" step="0.01" value="0.00">
       </div>
       <div class="control" id="osc-section">
-        <label><span class="lbl-text">oscillating inflow <span class="help" data-tip="r41: sinusoidal gust at the inlet (Karman vortex street visualizer). All three amps default to 0 = pure uniform inflow (r38 behavior). amp_x: streamwise modulation (puffs the inlet speed up/down — does NOT produce vortex shedding). amp_y: lateral (y-axis) gust at x=0, modulated by z with wavelength = nz. amp_z: vertical (z-axis) gust, modulated by y with wavelength = ny. Cross-stream modulation (amp_y or amp_z > 0) is what builds up into a Karman vortex street behind the obstacle. frequency: cycles per LBM step (default 0.000 = off; try 0.005 for one cycle per 200 steps; 0.020 for one per 50 steps — the latter gives a tight, fast-shedding wake). At amp_y = 0.04 with f = 0.01 you can clearly see alternating vortices peeling off the cube at default settings.">?</span></span><span id="osc-active-val">off</span></label>
+        <label><span class="lbl-text">KarmanInflow <span class="help" data-tip="r41: sinusoidal gust at the inlet (Karman vortex street visualizer). All three amps default to 0 = pure uniform inflow (r38 behavior). amp_x: streamwise modulation (puffs the inlet speed up/down — does NOT produce vortex shedding). amp_y: lateral (y-axis) gust at x=0, modulated by z with wavelength = nz. amp_z: vertical (z-axis) gust, modulated by y with wavelength = ny. Cross-stream modulation (amp_y or amp_z > 0) is what builds up into a Karman vortex street behind the obstacle. frequency: cycles per LBM step (default 0.000 = off; try 0.005 for one cycle per 200 steps; 0.020 for one per 50 steps — the latter gives a tight, fast-shedding wake). At amp_y = 0.04 with f = 0.01 you can clearly see alternating vortices peeling off the cube at default settings.">?</span></span><span id="osc-active-val">off</span></label>
         <input type="range" id="osc-amp-x" min="0" max="0.10" step="0.001" value="0.000">
-        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_x <span id="osc-amp-x-val" style="float:right">0.000</span></div>
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">LongitudinalAmplitude <span id="osc-amp-x-val" style="float:right">0.000</span></div>
         <input type="range" id="osc-amp-y" min="0" max="0.10" step="0.001" value="0.000">
-        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_y (lateral) <span id="osc-amp-y-val" style="float:right">0.000</span></div>
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">LateralAmplitude <span id="osc-amp-y-val" style="float:right">0.000</span></div>
         <input type="range" id="osc-amp-z" min="0" max="0.10" step="0.001" value="0.000">
-        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">amp_z (vertical) <span id="osc-amp-z-val" style="float:right">0.000</span></div>
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">VerticalAmplitude <span id="osc-amp-z-val" style="float:right">0.000</span></div>
         <input type="range" id="osc-freq" min="0" max="0.05" step="0.001" value="0.000">
-        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">frequency <span id="osc-freq-val" style="float:right">0.000</span></div>
+        <div class="row" style="padding-left:14px;font-size:10px;color:var(--muted)">Frequency <span id="osc-freq-val" style="float:right">0.000</span></div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">camera preset <span class="help" data-tip="r48: snap the orbit camera to a canonical view. top-down: look straight down on the tunnel (good for verifying wake footprint). side-on: view from the z-axis (good for visualizing wake roll-up). isometric: the default 3/4 angle. wake-view: look from downstream toward the cube (good for visualizing the wake envelope). Keys 1-4 also trigger these.">?</span></span><span id="camera-preset-val">iso</span></label>
+        <label><span class="lbl-text">CameraPreset <span class="help" data-tip="r48: snap the orbit camera to a canonical view. top-down: look straight down on the tunnel (good for verifying wake footprint). side-on: view from the z-axis (good for visualizing wake roll-up). isometric: the default 3/4 angle. wake-view: look from downstream toward the cube (good for visualizing the wake envelope). Keys 1-4 also trigger these.">?</span></span><span id="camera-preset-val">iso</span></label>
         <div class="row" style="display:flex;gap:4px;padding:2px 0">
-          <button class="preset-btn" data-preset="top-down" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">top-down</button>
-          <button class="preset-btn" data-preset="side-on" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">side-on</button>
-          <button class="preset-btn" data-preset="iso" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">iso 3/4</button>
-          <button class="preset-btn" data-preset="wake-view" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">wake</button>
+          <button class="preset-btn" data-preset="top-down" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">TopDown</button>
+          <button class="preset-btn" data-preset="side-on" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">SideOn</button>
+          <button class="preset-btn" data-preset="iso" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">Iso</button>
+          <button class="preset-btn" data-preset="wake-view" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">WakeView</button>
         </div>
-        <div class="row" style="padding:4px 0;font-size:10px;color:var(--muted)">keys: <kbd>1</kbd> top-down &middot; <kbd>2</kbd> side-on &middot; <kbd>3</kbd> iso &middot; <kbd>4</kbd> wake</div>
+        <div class="row" style="padding:4px 0;font-size:10px;color:var(--muted)">Keys: <kbd>1</kbd>–<kbd>4</kbd> Presets</div>
       </div>
       <div class="control">
-        <label><span class="lbl-text">shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
+        <label><span class="lbl-text">Shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
         <select id="artifact-shape" style="width:100%;padding:5px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:12px">
-          <option value="box">cube</option>
-          <option value="sphere">sphere</option>
-          <option value="cylinder">cylinder</option>
-          <option value="wedge">wedge</option>
-          <option value="cone">cone</option>
-          <option value="tetrahedron">tetrahedron</option>
+          <option value="box">Cube</option>
+          <option value="sphere">Sphere</option>
+          <option value="cylinder">Cylinder</option>
+          <option value="wedge">Wedge</option>
+          <option value="cone">Cone</option>
+          <option value="tetrahedron">Tetrahedron</option>
         </select>
       </div>
       <div class="control">
-        <label><span class="lbl-text">rotate X <span class="help" data-tip="Rotation around the X axis (roll) in degrees. Any 0..360° is allowed (1° steps). Try 45° to see how a tilted cube/wedge affects the wake.">?</span></span><span id="rot-x-val">0°</span></label>
+        <label><span class="lbl-text">Roll <span class="help" data-tip="Rotation around the X axis (roll) in degrees. Any 0..360° is allowed (1° steps). Try 45° to see how a tilted cube/wedge affects the wake.">?</span></span><span id="rot-x-val">0°</span></label>
         <input type="range" id="rot-x" min="0" max="360" step="1" value="0">
       </div>
       <div class="control">
-        <label><span class="lbl-text">rotate Y <span class="help" data-tip="Rotation around the Y axis (pitch) in degrees. Try Y=45° + Z=45° on a cube to make wind hit a corner instead of a flat face.">?</span></span><span id="rot-y-val">0°</span></label>
+        <label><span class="lbl-text">Pitch <span class="help" data-tip="Rotation around the Y axis (pitch) in degrees. Try Y=45° + Z=45° on a cube to make wind hit a corner instead of a flat face.">?</span></span><span id="rot-y-val">0°</span></label>
         <input type="range" id="rot-y" min="0" max="360" step="1" value="0">
       </div>
       <div class="control">
-        <label><span class="lbl-text">rotate Z <span class="help" data-tip="Rotation around the Z axis (yaw) in degrees. Z=45° on a cube presents an edge to the wind instead of a face; combined with Y=45° it presents a corner.">?</span></span><span id="rot-z-val">0°</span></label>
+        <label><span class="lbl-text">Yaw <span class="help" data-tip="Rotation around the Z axis (yaw) in degrees. Z=45° on a cube presents an edge to the wind instead of a face; combined with Y=45° it presents a corner.">?</span></span><span id="rot-z-val">0°</span></label>
         <input type="range" id="rot-z" min="0" max="360" step="1" value="0">
       </div>
       <div class="buttons">
-        <button id="play" class="primary">▶ Play</button>
+        <button id="play" class="primary">Play</button>
         <button id="step-once">Step</button>
         <button id="reset">Reset</button>
       </div>
       <div id="camera-help">
-        <kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>R</kbd> reset view
+        <kbd>Drag</kbd> orbit · <kbd>Scroll</kbd> zoom · <kbd>R</kbd> reset view
       </div>
       <div id="selftest-section">
-        <div id="selftest-badge">self-test: idle</div>
-        <button id="run-selftest">Run self-test</button>
+        <div id="selftest-badge">SelfTest: idle</div>
+        <button id="run-selftest">RunSelfTest</button>
         <div id="selftest-log"></div>
       </div>
       <footer>
-        <a href="?selftest=1">?selftest=1</a>
-        <a href="https://github.com/JorgeQuijano/windsurf">github</a>
+        <a href="?selftest=1">?Selftest=1</a>
+        <a href="https://github.com/JorgeQuijano/windsurf">GitHub</a>
       </footer>
     </aside>
   </div>

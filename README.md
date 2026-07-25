@@ -1,129 +1,147 @@
-# windsurf — 3D wind tunnel in your browser
+# Windsurf
 
-Real-time 3D CFD wind-tunnel simulator. Single HTML file, no build step,
-runs entirely in the browser via WebGPU compute (with a WebGL2 + CPU
-fallback). Hosted on GitHub Pages.
-
-The Rust implementation that this was ported from is preserved at
-[**JorgeQuijano/windsurf-rust-archive**](https://github.com/JorgeQuijano/windsurf-rust-archive)
-(the 4-crate `wgpu + egui` workspace, ~2300 LOC).
-
-## What it does
-
-- **Lattice Boltzmann** D3Q19 solver with bounce-back boundary handling
-- **Obstacles**: sphere, box, cylinder, torus (full SDFs, ray-marched)
-- **Live drag computation** (pressure integration over obstacle surface)
-- **Streamline tracing** (RK2 particle integration through the velocity field)
-- **3D volumetric ray-march** of the velocity/density field, viridis colour map
-- **22 self-tests** that validate algorithm correctness (`?selftest=1`)
-
-## Try it
+Real-time 3D CFD wind-tunnel simulator that runs in your browser.
+Single HTML file, no build step, no dependencies.
 
 👉 **<https://jorgequijano.github.io/windsurf/>**
 
-Open the URL in Chrome / Edge for the fastest path (WebGPU). Safari and
-Firefox fall back to the CPU solver + WebGL2 renderer.
+Powered by a D3Q19 Lattice Boltzmann solver with a WebGPU compute
+backend and a WebGL2 + CPU fallback. Hosted on GitHub Pages.
 
-Append `?selftest=1` to run the algorithm validation suite in the
-console. Append `?cpu=1` to force the CPU fallback for comparison.
+## Features
+
+- **LatticeBoltzmannSolver** — D3Q19, bounce-back walls, Smagorinsky LES
+- **SixShapeObstacles** — Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron
+- **LiveDragReadout** — Pressure + viscous breakdown, real-time Cd display
+- **CdOverTimeStrip** — Rolling 10-second Cd waveform (Karman shedding visible)
+- **CdVsWindSpeedPlot** — Scatter Cd as a function of inlet velocity
+- **StreamlinesAndPathlines** — RK2 particle integration, burst or continuous
+- **RibbonMode** — Streamlines rendered as ribbons (flat strips with width)
+- **VolumetricRayMarch** — Density, VelocityMagnitude, VorticityMagnitude, Pressure
+- **SlicePlane** — 2D cross-section at the mid-plane
+- **SmokeLayer** — Passive scalar with band-pass gate and decay
+- **OscillatingInflow** — Sinusoidal gust in 3 axes for Karman vortex streets
+- **CameraPresets** — TopDown, SideOn, Iso, WakeView
+- **SelfTestHarness** — 79 in-browser assertions covering the solver, geometry, and UI
+
+## Live Demo
+
+Open the URL in **Chrome / Edge** for the fastest path (WebGPU).
+**Safari** and **Firefox** fall back to the CPU solver + WebGL2 renderer.
+
+Append `?selftest=1` to run the validation suite in the console.
+Append `?cpu=1` to force the CPU fallback for comparison.
 
 ## Controls
 
-| input | action |
+| Input | Action |
 |---|---|
-| mouse drag | orbit camera |
-| mouse wheel | dolly in/out |
-| R | reset camera |
-| `▶ Play` | run the solver continuously |
-| `Step` | advance one LBM step |
-| `Reset` | reset the field |
-| sliders | `u_inf` (inlet velocity), `ν` (viscosity), steps/frame |
+| Mouse drag | Orbit camera |
+| Mouse wheel | Dolly in / out |
+| `R` | Reset camera |
+| `1`–`4` | Camera presets (TopDown, SideOn, Iso, WakeView) |
+| `Play` | Run the solver continuously |
+| `Step` | Advance one LBM step |
+| `Reset` | Reset the field |
 
 ## Performance
 
-| backend | 32³ grid | notes |
+| Backend | Frame Rate | Notes |
 |---|---|---|
 | WebGPU compute | 30–60 fps | Chrome / Edge on a recent GPU |
-| CPU JS | 2–5 fps | Safari, Firefox, mobile — still usable |
-| Rust (original) | 5–15 fps | baseline reference |
+| WebGL2 + CPU | 2–5 fps | Safari, Firefox, mobile |
+| CPU JS only | 1–3 fps | Headless / low-power devices |
 
-## Repository layout
+## Repository Layout
 
 ```
-.
-├── index.html              the entire app (JS + WGSL + GLSL inline)
-├── test-selftest.mjs       Node-based self-test runner for CI
-├── .github/workflows/ci.yml GitHub Actions: headless self-test
+windsurf/
+├── index.html          The entire app (JS + WGSL + GLSL inline)
+├── test-selftest.mjs     Node-based self-test runner
+├── wireframe-gen.js      Procedural wireframe generator (utility)
 └── README.md
 ```
 
-The Rust port-of-port is intentionally not checked in — the entire app
-is `index.html`. Edit → push → refresh → see change. The iteration
-loop is sub-second on any commit.
+The entire app is `index.html`. Edit → push → refresh → see change.
+The iteration loop is sub-second on any commit.
 
 ## Validation
 
-22 in-browser assertions (mirrors the Rust unit tests 1:1):
+Seventy-nine in-browser assertions cover the solver, geometry, and UI:
 
-- D3Q19 weights and lattice indexing invariants
-- Equilibrium distribution produces the expected steady state at t=0
-- All four obstacle SDFs are negative inside, zero at the surface
-- LBM relaxation parameter τ = ν/cs² + 0.5 is in the stable range
-- Empty grid stays close to uniform over many steps
-- Sphere obstacle produces measurable flow stagnation in front
-- Empty scene reports zero drag
-- Streamline particles advance downstream and recycle at the outlet
-- Sphere obstacle deflects particles around it
-- Uniform-flow and sphere-density scenes stay bounded (no NaNs/explosions)
-- Sphere drag coefficient lands in the physically reasonable range
+- **LbmInvariants** — D3Q19 weights, lattice indexing, equilibrium function
+- **EquilibriumDistribution** — Steady state at t=0
+- **SdfObstacles** — All six shapes are negative inside, zero at the surface
+- **RelaxationParameter** — τ = ν/cs² + 0.5 in the stable range
+- **UniformFlow** — Empty grid stays close to uniform over many steps
+- **SphereStagnation** — Measurable flow stagnation in front of the sphere
+- **EmptyScene** — Zero drag report
+- **ParticleAdvance** — Streamline particles advance downstream and recycle
+- **ObstacleDeflection** — Particles divert around the obstacle
+- **Boundedness** — No NaNs or explosions in any scene
+- **DragCoefficient** — Sphere Cd lands in the physically reasonable range
+- **CameraPresets** — All four presets snap to canonical views
+- **PathlineModes** — Burst and Continuous behave as configured
+- **VolumetricGate** — Vorticity field exceeds the visibility threshold
+- **CdOverTimeStrip** — Canvas, source, window constant, buffer cap, animate-loop wiring, trim logic, clear button, draw loop
 
-Run them in Node (no browser needed):
+Run in Node (no browser needed):
 
 ```bash
 node test-selftest.mjs
 ```
 
-Run them in a browser at `?selftest=1` — results print to the console
-and render as a green/red badge in the side panel.
+Run in a browser at `?selftest=1` — results print to the console and
+render as a green / red badge in the side panel.
 
-## Local development
+## Local Development
 
 No build. Clone and open:
 
 ```bash
 git clone https://github.com/JorgeQuijano/windsurf.git
-xdg-open windsurf/index.html   # or just point your browser at it
+cd windsurf
+xdg-open index.html        # Linux
+open index.html            # macOS
+start index.html           # Windows
 ```
 
-For iteration, run a local server if you want (GitHub Pages parity):
+For iteration with GitHub Pages parity (the recommended path):
 
 ```bash
-cd windsurf && python3 -m http.server 8080
+python3 -m http.server 8080
 # open http://localhost:8080
 ```
 
 ## CI
 
-The CI workflow file (`.github/workflows/ci.yml`) is intentionally **not
-committed** — the OAuth token used to push this repo doesn't carry the
-`workflow` scope, which GitHub requires to add `.github/workflows/*.yml`
-files. To enable CI:
+The CI workflow is intentionally **not committed** — the OAuth token
+used to push this repo does not carry the `workflow` scope required by
+GitHub to add `.github/workflows/*.yml` files. To enable CI:
 
-1. On GitHub → Settings → Actions → General → "Allow all actions and
-   reusable workflows" (already on for public repos).
-2. Create `.github/workflows/ci.yml` from the snippet in this README's
-   repo (or copy the local file) and push it manually.
+1. Create `.github/workflows/ci.yml` locally with the standard
+   `actions/checkout` + `actions/setup-node` + `node test-selftest.mjs`
+   recipe.
+2. Push it manually with a token that has the `workflow` scope.
 
-The `selftest` job runs `node test-selftest.mjs` on every push. The
-`pages` job deploys `index.html` to GitHub Pages.
+The `selftest` job runs `node test-selftest.mjs` on every push.
+A `pages` job deploys `index.html` to GitHub Pages.
 
-## Why a port?
+## Design Notes
 
-Rust was correct, fast, and stable — but the rebuild-and-push loop
-made rapid UI iteration painful. JS in a single file trades a bit of
-peak performance for a sub-second edit → refresh cycle and zero
-install friction.
+- **Single-file constraint** — the entire app must live in one HTML
+  file. WGSL and GLSL are inlined; there are no `import` statements.
+- **Sub-second iteration** — the edit → refresh cycle is the design
+  centre. Any change that adds a build step is rejected.
+- **CpuAndGpuParity** — every feature must work on both backends.
+  If `backend.computeDrag` does not exist, the WebGPU path falls
+  back to the async `computeDragAsync` feed.
+- **LiveUiUpdates** — slider changes use `updateConfig()` rather
+  than `backend.reset()` so the wake is preserved across drags.
+- **BoundedScale** — `CD_MAX_CLAMP` (8.0) caps transient drag spikes
+  so the Cd plots remain readable after a wind-speed change.
 
-## Credits
+## License
 
-Original Rust implementation, geometry, and LBM numerics: Jorge Quijano.
+Single-author project. Original implementation, geometry, and LBM
+numerics: Jorge Quijano.
