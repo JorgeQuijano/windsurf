@@ -299,7 +299,7 @@
         <h1>windsurf <span style="color:var(--muted);font-weight:normal;font-size:12px">— js</span></h1>
         <span id="backend-badge">detecting…</span>
       </header>
-      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r50-2026-07-25 (Cd-over-time strip — a thin sparkline below the Cd-vs-wind plot shows the rolling 10-second Cd waveform. The Karman vortex shedding oscillation is visible as a periodic wave at the right Strouhal frequency. Strip buffer caps at 256 entries; auto-scaled Y; cyan waveform; Y labels show current min/max so the oscillation envelope is readable. Each render frame samples Cd on the CPU path; WebGPU falls back to the existing 2 Hz feed.)</span></div>
+      <div class="row" id="build-tag" style="font-size:10px;color:var(--muted);font-family:ui-monospace,monospace;padding:0 0 6px"><span>build</span><span>r50-2026-07-25 (Cd-over-time strip — a thin sparkline below the Cd-vs-wind plot shows the rolling 10-second Cd waveform. The Karman vortex shedding oscillation is visible as a periodic wave at the right Strouhal frequency. Strip buffer caps at 256 entries; auto-scaled Y; cyan waveform; Y labels show current min/max so the oscillation envelope is readable. Each render frame samples Cd on the CPU path; WebGPU falls back to the existing 2 Hz feed. CD_MAX_CLAMP raised 5.0→8.0 so Karman peaks aren't clipped.)</span></div>
       <div id="readout">
         <div class="row"><span>FPS</span><span id="fps">–</span></div>
         <div class="row"><span>steps/s</span><span id="sps">–</span></div>
