@@ -302,7 +302,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r54-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r54.1-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
         </details>
       </div>
       <div id="readout">
@@ -5416,6 +5416,17 @@ function registerTests(tr) {
     const status = document.getElementById('frame-budget-status').textContent;
     return status.includes('30');
   });
+  // r54.1: regression — _frameBudgetState must be declared before
+  // tick() is called. Previously this crashed on the very first
+  // requestAnimationFrame with "ReferenceError: _frameBudgetState is
+  // not defined". The test catches ReferenceError by returning
+  // true on success, false on throw. window.__tick is exposed
+  // on the same scope as the rAF callback so the call exercises
+  // the same code path that production hits on every frame.
+  tr.test('r54_1_tick_does_not_throw', () => {
+    if (typeof window.__tick !== 'function') return false;
+    try { window.__tick(); return true; } catch (e) { return false; }
+  });
 }
 
 /* =====================================================================
@@ -6014,6 +6025,11 @@ async function main() {
   // simulator's CPU work (backend.step()) runs each frame regardless,
   // so we trade fluid-input latency for cycle savings on battery.
   let frameBudgetHz = 0;          // default: uncapped (matches r53 behavior)
+  // r54: throttle state. _frameBudgetState tracks the last frame's
+  // wall-clock timestamp so the next tick() call can decide whether
+  // to render or reschedule. Persisted on main()'s closure so it
+  // survives across frames.
+  const _frameBudgetState = { lastTickMs: 0 };
   // r54: visibility-aware auto-pause. When the tab goes background we
   // don't want the sim to keep burning CPU. We switch to a 4 Hz
   // 'background tick' that keeps smoke / wake fresh without doing
@@ -7376,6 +7392,12 @@ async function main() {
 
     requestAnimationFrame(tick);
   }
+  // r54.1: expose tick() for tests so we can invoke the real loop
+  // body (not the rAF-rescheduled stub) and catch scope bugs like
+  // _frameBudgetState reference-before-declare. Calling tick()
+  // exercises the same code path that requestAnimationFrame runs
+  // on every browser frame.
+  window.__tick = tick;
 
   function resize() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
