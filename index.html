@@ -311,7 +311,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r55.1-2026-07-26 (r55: SurfaceForces visualization — toggle on to color each cube face by pressure (red/white/blue diverging) and draw drag arrow + lift arrow + per-face force vectors. r55.1: TDZ regression fix for lastBgTickMs reference-before-declare in visibilitychange handler. New SurfaceForces checkbox in ribbon panel; window.__surfaceForces exposed for tests.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r56: surface forces — per-face pressure colors the cube mesh (red/white/blue diverging colormap on the actual cube), plus Fx/Fy force arrows. r55 used floating dots in mid-air, which were confusing; this puts the visualization on the cube itself. Toggle: Visualization → SurfaceForces. Shift+D to show dev details.</div>
         </details>
       </div>
       <div id="readout">
@@ -1575,6 +1575,26 @@ function computeDrag(solver, obstacleIdx, opts = {}) {
   const cd_pressure = (area > 0 && u_inf > 1e-9) ? (2 * fxp) / (q * A) : 0;
   const cd_viscous = (area > 0 && u_inf > 1e-9) ? (2 * fxv) / (q * A) : 0;
   const re = nu > 1e-9 ? u_inf * Math.sqrt(area) / nu : 0;
+  // r56: aggregate per-face average pressure when surface[] was sampled.
+  // The shader needs 6 scalar values (one per cube face) and a
+  // normalization denominator (maxAbsP) for the rdbu colormap.
+  let faceAvgP = null;
+  let maxAbsP = 0;
+  if (opts.surface && surface && surface.length > 0) {
+    const sums = [0, 0, 0, 0, 0, 0];
+    const counts = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < surface.length; i++) {
+      const cell = surface[i];
+      const fid = cell.faceId | 0;
+      if (fid >= 0 && fid < 6) {
+        sums[fid] += cell.p;
+        counts[fid] += 1;
+        const ap = Math.abs(cell.p);
+        if (ap > maxAbsP) maxAbsP = ap;
+      }
+    }
+    faceAvgP = sums.map((s, i) => counts[i] > 0 ? s / counts[i] : 0);
+  }
   return {
     force: { x: fx, y: fy, z: fz },
     pressureForce: { x: fxp, y: fyp, z: fzp },
@@ -1586,6 +1606,8 @@ function computeDrag(solver, obstacleIdx, opts = {}) {
     reynolds: re,
     surfaceCells: Math.floor(area),
     surface: opts.surface ? surface : undefined,
+    faceAvgP: faceAvgP,  // r56: array of 6 average face pressures, or null
+    maxAbsP: maxAbsP,    // r56: for colormap normalization; 0 means unset
   };
 }
 
@@ -3874,39 +3896,89 @@ function createLineRenderer(canvas) {
    Vertex layout: pos(3) + normal(3) + color(3) = 9 floats per vertex.
    ===================================================================== */
 
+// r56: per-face vertex layout is pos(3) + normal(3) + faceId(1) = 7
+// floats per vertex. The cube shader receives the per-face pressure
+// (uniform vec4 u_p01 + vec2 u_p23_45) and maxAbsP for normalization.
+// When u_surfaceForces==0, falls back to a fixed cool palette per face
+// so the cube stays visible.
 const CUBE_VS = `#version 300 es
 in vec3 a_pos;
 in vec3 a_normal;
-in vec3 a_color;
+in float a_faceId;
 uniform mat4 u_viewProj;
 out vec3 v_normal;
-out vec3 v_color;
+flat out int v_faceId;
 void main() {
   v_normal = a_normal;
-  v_color = a_color;
+  v_faceId = int(a_faceId + 0.5);
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
 }`;
 
 const CUBE_FS = `#version 300 es
 precision mediump float;
 in vec3 v_normal;
-in vec3 v_color;
+flat in int v_faceId;
 uniform vec3 u_lightDir;
-uniform float u_alpha;  // r21: artifact opacity slider (1.0 = solid)
+uniform float u_alpha;
+uniform int u_surfaceForces;       // r56: 0 = fallback palette, 1 = pressure
+uniform vec4 u_p0123;              // face pressures for faceId 0..3
+uniform vec2 u_p45;                // face pressures for faceId 4..5
+uniform float u_maxAbsP;           // normalization denominator
 out vec4 outColor;
+
+float facePressure(int id) {
+  if (id == 0) return u_p0123.x;
+  if (id == 1) return u_p0123.y;
+  if (id == 2) return u_p0123.z;
+  if (id == 3) return u_p0123.w;
+  if (id == 4) return u_p45.x;
+  return u_p45.y;
+}
+
+// r56: rdbu diverging colormap. -1 = pure red, 0 = white, +1 = pure blue.
+// Matches the JS-side rdbu() used in the volumetric pressure field.
+vec3 rdbu(float t) {
+  t = clamp(t, -1.0, 1.0);
+  vec3 neg = vec3(0.403, 0.0, 0.121);     // deep red
+  vec3 mid = vec3(0.969, 0.969, 0.969);   // near-white
+  vec3 pos = vec3(0.031, 0.376, 0.624);   // deep blue
+  if (t < 0.0) return mix(mid, neg, -t);
+  return mix(mid, pos, t);
+}
+
+// r56: fallback palette per faceId (cool, distinguishable).
+vec3 fallbackPalette(int id) {
+  vec3 cols[6] = vec3[6](
+    vec3(0.75, 0.75, 0.85),
+    vec3(0.55, 0.65, 0.75),
+    vec3(0.85, 0.75, 0.65),
+    vec3(0.55, 0.55, 0.65),
+    vec3(0.75, 0.85, 0.75),
+    vec3(0.65, 0.55, 0.55)
+  );
+  return cols[id];
+}
+
 void main() {
-  // Half-Lambert keeps the back faces from going pitch black. r29:
-  // bumped ambient from 0.45 to 0.60 so the dark side reads as ~60%
-  // brightness rather than ~50%, which makes the sphere read as a
-  // single shape instead of "bright top + invisible bottom".
   float ndl = dot(normalize(v_normal), normalize(u_lightDir));
   float lit = 0.60 + 0.40 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
-  outColor = vec4(v_color * lit, u_alpha);
+  vec3 baseCol;
+  if (u_surfaceForces == 1 && u_maxAbsP > 1e-9) {
+    float p = facePressure(v_faceId);
+    float t = p / u_maxAbsP;            // normalise to [-1, 1]
+    baseCol = rdbu(t);
+  } else {
+    baseCol = fallbackPalette(v_faceId);
+  }
+  // r56: when surfaceForces is off, leave near-white-ish face palette so
+  // the cube stays readable. When on, the colors are saturated by design.
+  if (u_surfaceForces == 0) lit = 0.85 + 0.15 * lit;
+  outColor = vec4(baseCol * lit, u_alpha);
 }`;
 
 // Build 6 faces of a cube centered at origin, side length 2 (will be
 // scaled at draw time). Returns flat Float32Array of pos+normal+color.
-function buildCubeMesh(scale, halfExtents, position, colors, rotation) {
+function buildCubeMesh(scale, halfExtents, position, rotation) {
   // r28: cube now honors the rotation matrix passed in from buildObstacle().
   // Before r28, buildCubeMesh signature was (scale, halfExtents, position,
   // colors) — rotation was silently dropped, so the X/Y/Z sliders had no
@@ -3950,15 +4022,9 @@ function buildCubeMesh(scale, halfExtents, position, colors, rotation) {
     const o = f * 4;
     triangles.push(o, o+1, o+2, o, o+2, o+3);
   }
-  // Flatten colors so each vertex gets its face's color.
-  // emitMesh expects a single color per shape; we replicate the per-face
-  // coloring by manually building the array and applying rotation+position
-  // ourselves (same math as emitMesh, but per-vertex color).
-  const flatColors = [];
-  for (let f = 0; f < 6; f++) {
-    const c = colors[f];
-    for (let j = 0; j < 4; j++) flatColors.push(c[0], c[1], c[2]);
-  }
+  // r56: per-vertex layout is pos(3) + normal(3) + faceId(1) = 7 floats.
+  // The faceId attributes are derived from the position in localVerts,
+  // which is laid out 4 vertices per face in 6 faces (24 verts).
   // Apply rotation + position. Same math as emitMesh.
   const rot = rotation || [1, 0, 0, 0, 1, 0, 0, 0, 1];
   const verts = [];
@@ -3972,29 +4038,27 @@ function buildCubeMesh(scale, halfExtents, position, colors, rotation) {
     const nx = rot[0]*n[0] + rot[1]*n[1] + rot[2]*n[2];
     const ny = rot[3]*n[0] + rot[4]*n[1] + rot[5]*n[2];
     const nz = rot[6]*n[0] + rot[7]*n[1] + rot[8]*n[2];
+    const faceId = Math.floor(i / 4); // 0..5
     verts.push(
       wx, wy, wz,
       nx, ny, nz,
-      flatColors[i*3], flatColors[i*3+1], flatColors[i*3+2]
+      faceId
     );
   }
-  // Now expand to per-triangle layout (cube mesh needs 36 verts not 24).
-  // The localVerts list above has 4 verts per face (24 verts), but we need
-  // each face to be 2 triangles of 3 verts each (6 verts per face = 36).
+  // r56: expand to per-triangle layout. 7 floats per vertex
+  // (pos.xyz + normal.xyz + faceId). Each face = 2 tris = 6 verts.
   const out = [];
   for (let f = 0; f < 6; f++) {
     const o = f * 4;
     // Tri 1: 0, 1, 2
     for (const k of [0, 1, 2]) {
-      out.push(verts[(o+k)*9], verts[(o+k)*9+1], verts[(o+k)*9+2],
-               verts[(o+k)*9+3], verts[(o+k)*9+4], verts[(o+k)*9+5],
-               verts[(o+k)*9+6], verts[(o+k)*9+7], verts[(o+k)*9+8]);
+      const i = (o + k) * 7;
+      out.push(verts[i], verts[i+1], verts[i+2], verts[i+3], verts[i+4], verts[i+5], verts[i+6]);
     }
     // Tri 2: 0, 2, 3
     for (const k of [0, 2, 3]) {
-      out.push(verts[(o+k)*9], verts[(o+k)*9+1], verts[(o+k)*9+2],
-               verts[(o+k)*9+3], verts[(o+k)*9+4], verts[(o+k)*9+5],
-               verts[(o+k)*9+6], verts[(o+k)*9+7], verts[(o+k)*9+8]);
+      const i = (o + k) * 7;
+      out.push(verts[i], verts[i+1], verts[i+2], verts[i+3], verts[i+4], verts[i+5], verts[i+6]);
     }
   }
   return new Float32Array(out);
@@ -4219,35 +4283,55 @@ function createCubeRenderer(canvas) {
   gl.bindVertexArray(vao);
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  const STRIDE = 9 * 4; // 9 floats per vertex
+  const STRIDE = 7 * 4; // r56: 7 floats per vertex (pos+normal+faceId)
   const aPos = gl.getAttribLocation(prog, 'a_pos');
   const aNormal = gl.getAttribLocation(prog, 'a_normal');
-  const aColor = gl.getAttribLocation(prog, 'a_color');
+  const aFaceId = gl.getAttribLocation(prog, 'a_faceId');
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, STRIDE, 0);
   gl.enableVertexAttribArray(aNormal);
   gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, STRIDE, 12);
-  gl.enableVertexAttribArray(aColor);
-  gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, STRIDE, 24);
+  if (aFaceId >= 0) {
+    gl.enableVertexAttribArray(aFaceId);
+    gl.vertexAttribPointer(aFaceId, 1, gl.FLOAT, false, STRIDE, 24);
+  }
   gl.bindVertexArray(null);
 
   const uViewProj = gl.getUniformLocation(prog, 'u_viewProj');
   const uLightDir = gl.getUniformLocation(prog, 'u_lightDir');
   const uAlpha = gl.getUniformLocation(prog, 'u_alpha');
+  const uSurfaceForces = gl.getUniformLocation(prog, 'u_surfaceForces');
+  const uP0123 = gl.getUniformLocation(prog, 'u_p0123');
+  const uP45 = gl.getUniformLocation(prog, 'u_p45');
+  const uMaxAbsP = gl.getUniformLocation(prog, 'u_maxAbsP');
 
   return {
     gl, prog, vao, buf,
     uploadMesh(arr) {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
-      this._vertexCount = arr.length / 9;
+      this._vertexCount = arr.length / 7;
     },
-    draw(viewProj, lightDir, alpha = 1.0) {
+    draw(viewProj, lightDir, alpha = 1.0, surfaceState) {
       gl.useProgram(prog);
       gl.bindVertexArray(vao);
       gl.uniformMatrix4fv(uViewProj, false, viewProj);
       gl.uniform3f(uLightDir, lightDir[0], lightDir[1], lightDir[2]);
       gl.uniform1f(uAlpha, alpha);
+      // r56: surface forces state. surfaceState = { enabled, p[6], maxAbsP }
+      if (surfaceState && surfaceState.enabled) {
+        const p = surfaceState.p || [0,0,0,0,0,0];
+        const maxAbsP = surfaceState.maxAbsP || 1e-9;
+        gl.uniform1i(uSurfaceForces, 1);
+        gl.uniform4f(uP0123, p[0]||0, p[1]||0, p[2]||0, p[3]||0);
+        gl.uniform2f(uP45, p[4]||0, p[5]||0);
+        gl.uniform1f(uMaxAbsP, maxAbsP);
+      } else {
+        gl.uniform1i(uSurfaceForces, 0);
+        gl.uniform4f(uP0123, 0, 0, 0, 0);
+        gl.uniform2f(uP45, 0, 0);
+        gl.uniform1f(uMaxAbsP, 1.0);
+      }
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
       // r21: enable alpha blending when the slider is < 1.0 so the
@@ -5497,6 +5581,61 @@ function registerTests(tr) {
     return /let\s+lastBgTickMs\s*=/.test(srcText);
   });
 
+  tr.test('r56_cube_mesh_per_face_layout', () => {
+    // r56: buildCubeMesh now emits pos(3)+normal(3)+faceId(1)=7 floats
+    // per vert (was 9 with a_color). 24 unique verts -> 36 (6 verts
+    // per face for 6 faces).
+    const obs = obstacleBox({ x: 0, y: 0, z: 0 }, { x: 2, y: 2, z: 2 });
+    const mesh = buildCubeMesh(1, { x: 2, y: 2, z: 2 }, { x: 0, y: 0, z: 0 }, [1,0,0,0,1,0,0,0,1]);
+    tr.assert(mesh instanceof Float32Array, 'buildCubeMesh must return Float32Array');
+    tr.assert(mesh.length % 7 === 0, 'mesh length must be multiple of 7 (was 9 in r55)');
+    const nVerts = mesh.length / 7;
+    tr.assert(nVerts === 36, 'cube mesh has 36 verts (got ' + nVerts + ')');
+    // faceId is the 7th float per vertex. Faces are grouped 6 verts each.
+    const faces = new Set();
+    for (let i = 0; i < 36; i++) faces.add(Math.round(mesh[i * 7 + 6]));
+    tr.assert(faces.size === 6, 'all 6 faceIds present, got ' + Array.from(faces).join(','));
+    // Verify per-face consistency: 6 consecutive verts share one faceId.
+    for (let f = 0; f < 6; f++) {
+      const fid = Math.round(mesh[f * 6 * 7 + 6]);
+      for (let j = 1; j < 6; j++) {
+        tr.assert(Math.round(mesh[(f*6 + j)*7 + 6]) === fid, 'face ' + f + ' verts all share faceId');
+      }
+    }
+  });
+
+  tr.test('r56_compute_drag_returns_face_avg_p', () => {
+    // r56: computeDrag with opts.surface must also aggregate per-face
+    // average pressure and a maxAbsP scalar.
+    const config = {
+      nx: 32, ny: 32, nz: 32, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 4, y: 4, z: 4 })],
+    };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 80; i++) solver.step();
+    const result = computeDrag(solver, 0, { surface: true });
+    tr.assert(Array.isArray(result.faceAvgP), 'faceAvgP must be an array');
+    tr.assert(result.faceAvgP.length === 6, 'faceAvgP must have 6 entries');
+    tr.assert(typeof result.maxAbsP === 'number', 'maxAbsP must be a number');
+    tr.assert(result.maxAbsP > 0, 'maxAbsP must be > 0 after 80 steps');
+    // Face averages should roughly match the per-cell values.
+    // Pick a face with cells and verify its average equals the mean of
+    // the same face's cells.
+    const byFace = {};
+    for (let i = 0; i < result.surface.length; i++) {
+      const c = result.surface[i];
+      (byFace[c.faceId] = byFace[c.faceId] || []).push(c.p);
+    }
+    for (const fidStr in byFace) {
+      const fid = +fidStr;
+      const arr = byFace[fid];
+      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+      tr.assert(Math.abs(mean - result.faceAvgP[fid]) < 1e-5,
+        'face ' + fid + ' mean mismatch: ' + mean + ' vs ' + result.faceAvgP[fid]);
+    }
+  });
+
+
   // -- r55: surface forces --
   // 1. computeDrag(0, { surface: true }) returns a surface[] array
   //    whose entries each have { x, y, z, nx, ny, nz, p, fx, fy, fz,
@@ -5859,205 +5998,69 @@ function rdbuSurfaceJS(t) {
   return [1.0 + t, 1.0 + t, 1.0];
 }
 
+// r56: slimmed-down version. Per-face colors now live on the cube mesh
+// (driven by the cube shader uniforms u_p0123/u_p45/u_maxAbsP), so the
+// 2D overlay only draws the two big force arrows (Fx, Fy) anchored at
+// known world-space points to the side of the cube. No more "dots off
+// to the side of the cube" — the visualization now shows up exactly
+// where the cube is.
 function drawSurfaceOverlay(ctx, surfaceData, force, vp, w, h, gridHalf) {
   if (!vp || !vp.viewProj) return;
-  if (gridHalf === undefined) gridHalf = null;
   ctx.clearRect(0, 0, w, h);
+  if (!force) return;
 
-  // Group surface cells by faceId.
-  // faceId: 0=+x, 1=-x, 2=+y, 3=-y, 4=+z, 5=-z.
-  const faceBuckets = [[], [], [], [], [], []];
-  if (surfaceData && surfaceData.length) {
-    for (let i = 0; i < surfaceData.length; i++) {
-      faceBuckets[surfaceData[i].faceId].push(surfaceData[i]);
-    }
+  // The cube obstacle has half-extent SIZE ≈ 3 (cell units); use that
+  // as the anchor offset so the arrows stick out beyond the cube.
+  // World-units offset from cube center. The cube obstacle's
+  // default half-extent is ~SIZE=3; pick something a bit bigger so
+  // the arrow stems sit clearly outside the cube.
+  const offsetH = 4;
+  const arrowLen = 60;
+  const head = 8;
+
+  // --- Fx (drag, red) — anchored to the +x side of the cube ---------
+  if (Math.abs(force.x) > 1e-7) {
+    const start = projectToScreen(offsetH, 0, 0, vp, w, h);
+    const dirSign = force.x > 0 ? -1 : 1;
+    const end = projectToScreen(offsetH + dirSign * arrowLen * 0.04, 0, 0, vp, w, h);
+    if (start && end) drawArrow(ctx, start, end, '#ff6b6b', 3, head, 'Fx = ' + force.x.toFixed(4), 0, -12);
   }
-  if (!faceBuckets[0].length && !faceBuckets[1].length) return;
-
-  // Compute the cube's bbox in cell coords from the surface sample.
-  // The center of the cube IS the world origin (0, 0, 0) — the
-  // obstacle is centered at (nx/2, ny/2, nz/2) in cell coords, so
-  // we need to subtract gridHalf (passed in by tick) to get world.
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const c of surfaceData) {
-    if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x;
-    if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y;
-    if (c.z < minZ) minZ = c.z; if (c.z > maxZ) maxZ = c.z;
+  // --- Fy (lift, green) — anchored to the -x side of the cube --------
+  if (Math.abs(force.y) > 1e-7) {
+    const start = projectToScreen(-offsetH * 1.4, 0, 0, vp, w, h);
+    const dirSign = force.y > 0 ? 1 : -1;
+    const end = projectToScreen(-offsetH * 1.4, dirSign * arrowLen * 0.04, 0, vp, w, h);
+    if (start && end) drawArrow(ctx, start, end, '#51cf66', 3, head, 'Fy = ' + force.y.toFixed(4), 24, 0);
   }
-  // Half-extents of the cube (in cell coords) along each axis.
-  const hxC = (maxX - minX + 1) / 2;
-  const hyC = (maxY - minY + 1) / 2;
-  const hzC = (maxZ - minZ + 1) / 2;
-  // Cube center in cell coords (should equal gridHalf if gridHalf is
-  // (nx/2, ny/2, nz/2)).
-  const cxC = (minX + maxX) / 2;
-  const cyC = (minY + maxY) / 2;
-  const czC = (minZ + maxZ) / 2;
-  // World-space face centers: cube is centered at world origin, so
-  // face center = (face_normal) * half_extent (in cell coords; the
-  // renderer treats cell space as world space 1:1 for the iso cube).
-  const faceCenters = [
-    { wx:  hxC, wy: 0, wz: 0, faceId: 0 },
-    { wx: -hxC, wy: 0, wz: 0, faceId: 1 },
-    { wx: 0, wy:  hyC, wz: 0, faceId: 2 },
-    { wx: 0, wy: -hyC, wz: 0, faceId: 3 },
-    { wx: 0, wy: 0, wz:  hzC, faceId: 4 },
-    { wx: 0, wy: 0, wz: -hzC, faceId: 5 },
-  ];
+}
 
-  // Find max |pressure| across all faces so per-face t is normalized.
-  let maxAbsP = 1e-9;
-  for (let i = 0; i < surfaceData.length; i++) {
-    if (Math.abs(surfaceData[i].p) > maxAbsP) maxAbsP = Math.abs(surfaceData[i].p);
-  }
-
-  for (const fc of faceCenters) {
-    const bucket = faceBuckets[fc.faceId];
-    if (bucket.length === 0) continue;
-    const proj = projectToScreen(fc.wx, fc.wy, fc.wz, vp, w, h);
-    if (!proj) continue;
-
-    // Average per-face pressure.
-    let pSum = 0;
-    let fSumX = 0, fSumY = 0, fSumZ = 0;
-    for (const c of bucket) {
-      pSum += c.p;
-      fSumX += c.fx; fSumY += c.fy; fSumZ += c.fz;
-    }
-    const pavg = pSum / bucket.length;
-
-    // Normalize pressure to [-1, 1] for the rdbu colormap.
-    const pNorm = Math.max(-1, Math.min(1, pavg / maxAbsP));
-    const [r, g, b] = rdbuSurfaceJS(pNorm);
-
-    // Draw a colored dot at the face center. Size scales with the
-    // number of surface cells in that face (bigger face -> bigger
-    // dot).
-    const dotSize = Math.max(8, Math.min(34, 6 + Math.sqrt(bucket.length) * 1.6));
-    ctx.beginPath();
-    ctx.arc(proj.x, proj.y, dotSize, 0, 2 * Math.PI);
-    ctx.fillStyle = 'rgb(' + Math.round(r*255) + ',' + Math.round(g*255) + ',' + Math.round(b*255) + ')';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // Per-face force vector. Project to a 2D direction by projecting
-    // a small offset along each axis.
-    const forceMag = Math.sqrt(fSumX*fSumX + fSumY*fSumY + fSumZ*fSumZ);
-    const arrowLen = Math.min(40, 4 + forceMag * 6000);
-    if (forceMag > 1e-7) {
-      // Build an end-point by offsetting from the face center along
-      // the per-face force direction. The face center is fc.wx/wy/wz
-      // (in world coords), so the arrow tip is on the face's plane.
-      const tn = arrowLen * 0.004;  // world-units per pixel ≈ scaling
-      const endWorld = {
-        x: fc.wx + (fSumX / forceMag) * tn,
-        y: fc.wy + (fSumY / forceMag) * tn,
-        z: fc.wz + (fSumZ / forceMag) * tn,
-      };
-      const endProj = projectToScreen(endWorld.x, endWorld.y, endWorld.z, vp, w, h);
-      if (endProj) {
-        ctx.beginPath();
-        ctx.moveTo(proj.x, proj.y);
-        ctx.lineTo(endProj.x, endProj.y);
-        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        // Arrowhead.
-        const dx = endProj.x - proj.x, dy = endProj.y - proj.y;
-        const len = Math.sqrt(dx*dx + dy*dy) || 1;
-        const ux = dx/len, uy = dy/len;
-        const headSize = 4;
-        ctx.beginPath();
-        ctx.moveTo(endProj.x, endProj.y);
-        ctx.lineTo(endProj.x - ux*headSize + uy*headSize*0.5, endProj.y - uy*headSize - ux*headSize*0.5);
-        ctx.lineTo(endProj.x - ux*headSize - uy*headSize*0.5, endProj.y - uy*headSize + ux*headSize*0.5);
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.fill();
-      }
-    }
-    // Magnitude label below the dot.
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.font = '10px ui-monospace,monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText((pavg.toExponential(2)).replace('e', '×10^'), proj.x, proj.y + dotSize + 2);
-  }
-
-  // Big drag arrow next to the cube (red, along -x direction).
-  // Cube's center in world coords is (0, 0, 0) for the iso-cube;
-  // arrow originates from (cube_right_edge + small offset, 0, 0)
-  // so the arrow sticks out the +x side. For a cube of half-extent
-  // h, place arrow at (+h + 1.5h, 0, 0).
-  if (force && Math.abs(force.x) > 1e-7) {
-    const h = Math.max(hxC, hyC, hzC);
-    const dragStart = projectToScreen(h * 1.5, 0, 0, vp, w, h);
-    if (dragStart) {
-      const arrowEndWorld = { x: h * 1.5 + (force.x > 0 ? -1 : 1) * Math.min(60, Math.abs(force.x) * 5000), y: 0, z: 0 };
-      const dragEnd = projectToScreen(arrowEndWorld.x, arrowEndWorld.y, arrowEndWorld.z, vp, w, h);
-      if (dragEnd) {
-        ctx.beginPath();
-        ctx.moveTo(dragStart.x, dragStart.y);
-        ctx.lineTo(dragEnd.x, dragEnd.y);
-        ctx.strokeStyle = '#ff6b6b';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        const dx = dragEnd.x - dragStart.x, dy = dragEnd.y - dragStart.y;
-        const len = Math.sqrt(dx*dx + dy*dy) || 1;
-        const ux = dx/len, uy = dy/len;
-        const headSize = 8;
-        ctx.beginPath();
-        ctx.moveTo(dragEnd.x, dragEnd.y);
-        ctx.lineTo(dragEnd.x - ux*headSize + uy*headSize*0.5, dragEnd.y - uy*headSize - ux*headSize*0.5);
-        ctx.lineTo(dragEnd.x - ux*headSize - uy*headSize*0.5, dragEnd.y - uy*headSize + ux*headSize*0.5);
-        ctx.closePath();
-        ctx.fillStyle = '#ff6b6b';
-        ctx.fill();
-        // Label.
-        ctx.fillStyle = '#ff6b6b';
-        ctx.font = 'bold 11px ui-monospace,monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('Fx = ' + force.x.toFixed(4), (dragStart.x + dragEnd.x)/2, (dragStart.y + dragEnd.y)/2 - 12);
-      }
-    }
-  }
-  // Big lift arrow (green, along y direction). Force.y is upward in
-  // world coords. Place it at (-2h, 0, 0) (left of cube).
-  if (force && Math.abs(force.y) > 1e-7) {
-    const h = Math.max(hxC, hyC, hzC);
-    const liftStart = projectToScreen(-h * 2.0, 0, 0, vp, w, h);
-    if (liftStart) {
-      const arrowEndWorld = { x: -h * 2.0, y: (force.y > 0 ? 1 : -1) * Math.min(60, Math.abs(force.y) * 5000), z: 0 };
-      const liftEnd = projectToScreen(arrowEndWorld.x, arrowEndWorld.y, arrowEndWorld.z, vp, w, h);
-      if (liftEnd) {
-        ctx.beginPath();
-        ctx.moveTo(liftStart.x, liftStart.y);
-        ctx.lineTo(liftEnd.x, liftEnd.y);
-        ctx.strokeStyle = '#51cf66';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        const dx = liftEnd.x - liftStart.x, dy = liftEnd.y - liftStart.y;
-        const len = Math.sqrt(dx*dx + dy*dy) || 1;
-        const ux = dx/len, uy = dy/len;
-        const headSize = 8;
-        ctx.beginPath();
-        ctx.moveTo(liftEnd.x, liftEnd.y);
-        ctx.lineTo(liftEnd.x - ux*headSize + uy*headSize*0.5, liftEnd.y - uy*headSize - ux*headSize*0.5);
-        ctx.lineTo(liftEnd.x - ux*headSize - uy*headSize*0.5, liftEnd.y - uy*headSize + ux*headSize*0.5);
-        ctx.closePath();
-        ctx.fillStyle = '#51cf66';
-        ctx.fill();
-        ctx.fillStyle = '#51cf66';
-        ctx.font = 'bold 11px ui-monospace,monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('Fy = ' + force.y.toFixed(4), (liftStart.x + liftEnd.x)/2 + 14, (liftStart.y + liftEnd.y)/2);
-      }
-    }
-  }
+// r56: small helper used by drawSurfaceOverlay.
+function drawArrow(ctx, start, end, color, lineW, headSize, label, labelDx, labelDy) {
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineW;
+  ctx.stroke();
+  // Arrowhead (filled triangle).
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  ctx.beginPath();
+  ctx.moveTo(end.x, end.y);
+  ctx.lineTo(end.x - ux * headSize + uy * headSize * 0.5,
+             end.y - uy * headSize - ux * headSize * 0.5);
+  ctx.lineTo(end.x - ux * headSize - uy * headSize * 0.5,
+             end.y - uy * headSize + ux * headSize * 0.5);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  // Label.
+  ctx.fillStyle = color;
+  ctx.font = 'bold 12px ui-monospace,monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, (start.x + end.x) / 2 + labelDx, (start.y + end.y) / 2 + labelDy);
 }
 
 function drawSlicePlane(ctx, canvas, backend, fieldMode) {
@@ -7798,8 +7801,19 @@ async function main() {
       // r21: pass artifactAlpha (from the opacity slider) to the cube
       // draw call so the user can dial transparency from 0 (invisible)
       // to 100% (fully solid).
+      // r56: pass surfaceForces state to the cube shader so per-face
+      // pressures paint the actual cube mesh (not floating dots).
+      // lastDragReport may be null on the very first frame; guard it.
       if (cube && cube._vertexCount > 0) {
-        cube.draw(vp.viewProj, LIGHT_DIR, artifactAlpha);
+        let surfaceState = null;
+        if (surfaceArrowsVisible && lastDragReport && lastDragReport.faceAvgP) {
+          surfaceState = {
+            enabled: true,
+            p: lastDragReport.faceAvgP,
+            maxAbsP: Math.max(lastDragReport.maxAbsP || 1e-9, 1e-9),
+          };
+        }
+        cube.draw(vp.viewProj, LIGHT_DIR, artifactAlpha, surfaceState);
       }
       if (lines) {
         // Update streamlines every frame (they move). The streamlines are
