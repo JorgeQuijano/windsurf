@@ -294,6 +294,15 @@
   <div id="app">
     <canvas id="render-canvas"></canvas>
     <canvas id="slice-canvas" style="position:absolute;left:12px;top:88px;width:300px;height:300px;background:rgba(8,10,18,0.85);border:1px solid rgba(255,255,255,0.18);border-radius:4px;display:none;pointer-events:none"></canvas>
+    <!-- r55: surface-arrows overlay. Covers the whole render canvas
+         (rendered ON TOP via absolute position + z-index). When the
+         SurfaceForces toggle is on, this canvas gets cleared and
+         re-drawn every frame with: per-face pressure-colored quads
+         at each cube face center, tiny per-face arrows showing the
+         averaged force direction, and two big arrows next to the
+         cube showing total drag (red) and lift (green). Drawing on
+         a 2D canvas avoids touching the WebGL pipeline. -->
+    <canvas id="surface-overlay" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none;z-index:2"></canvas>
     <aside id="panel">
       <header>
         <h1>Windsurf</h1>
@@ -302,7 +311,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r54.1-2026-07-25 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r55-2026-07-26 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
         </details>
       </div>
       <div id="readout">
@@ -399,6 +408,15 @@
         <label style="display:flex;align-items:center;gap:6px">
           <input type="checkbox" id="ribbon-toggle" style="width:14px;height:14px;cursor:pointer">
           <span class="lbl-text">RibbonMode <span class="help" data-tip="r45: render streamlines as ribbons (flat strips with width) instead of 1D lines. Each ribbon is billboarded to face the camera — at any orbit angle the ribbon shows its full width. Width is controlled by the 'ribbon width' slider. Useful for visualising flow direction over distance: a wide ribbon means slow flow, a narrow one means fast. Per-trail velocity is still colored (slow = red, fast = cyan) so speed is visible in the color gradient along the ribbon. Off by default to keep the line-style streamlines.">?</span></span>
+        </label>
+      </div>
+      <!-- r55: surface-forces toggle. When ON, cube faces are tinted
+           by surface pressure and big arrows next to the cube show
+           total drag (red, along wind) and total lift (green). -->
+      <div class="control">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="surface-forces-toggle" style="width:14px;height:14px;cursor:pointer">
+          <span class="lbl-text">SurfaceForces <span class="help" data-tip="r55: visualize forces on the cube directly. Each face is colored by average surface pressure (red = high, blue = low). Two big arrows appear next to the cube: red = total drag along wind (Fx), green = total lift (Fy). Per-face arrows also point along the local force vector. Toggle off to hide.">?</span></span>
         </label>
       </div>
       <div class="control">
@@ -1348,7 +1366,7 @@ class LbmSolver {
    SECTION 5 — Drag computation
    ===================================================================== */
 
-function computeDrag(solver, obstacleIdx) {
+function computeDrag(solver, obstacleIdx, opts = {}) {
   if (obstacleIdx >= solver.config.obstacles.length) {
     return {
       force: { x: 0, y: 0, z: 0 },
@@ -1356,6 +1374,7 @@ function computeDrag(solver, obstacleIdx) {
       viscousForce: { x: 0, y: 0, z: 0 },
       cd: 0, cdPressure: 0, cdViscous: 0,
       area: 0, reynolds: 0, surfaceCells: 0,
+      surface: opts.surface ? [] : undefined,
     };
   }
   const obs = solver.config.obstacles[obstacleIdx];
@@ -1381,6 +1400,11 @@ function computeDrag(solver, obstacleIdx) {
   let fxp = 0, fyp = 0, fzp = 0;     // pressure only
   let fxv = 0, fyv = 0, fzv = 0;     // viscous only
   let area = 0;
+  // r55: per-cell surface data buffer. Only allocated when callers
+  // pass `opts.surface`. Each entry: { x, y, z, nx, ny, nz, p, fx,
+  // fy, fz, faceId }. Used by the surface-arrows render pass to
+  // color cube faces by pressure and draw tiny per-cell force arrows.
+  const surface = opts.surface ? [] : null;
   const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 
   // Kinematic viscosity for the viscous stress. In LBM, ν = c_s² (τ - 1/2).
@@ -1499,6 +1523,39 @@ function computeDrag(solver, obstacleIdx) {
         fx = fxp + fxv;
         fy = fyp + fyv;
         fz = fzp + fzv;
+        // r55: per-cell surface sampling. When opts.surface is set, push
+        // the cell's world coordinates, surface normal, pressure value,
+        // and the cell's force vector (in world coords, NOT pressure only)
+        // into a flat array. The render pass uses this to color faces
+        // and draw tiny arrows next to each surface cell.
+        //
+        // Why we capture separately from the running totals: the totals
+        // are scalar sums; per-cell needs both the absolute world
+        // position AND the per-cell traction. Reusing fxp/fxv here
+        // would be wrong (they mutate as we iterate).
+        if (opts.surface) {
+          // Per-cell force in world coords: pressure * -n  (force ON the
+          // body is opposite the pressure pointing OUT of the surface)
+          // plus the viscous traction contribution. Wait — fxp/fyv are
+          // running totals; we want THIS cell's contribution. Compute
+          // it freshly from local pressure + t-vector.
+          const cellFx = -pressure * n.x + nu * rhoFluid * t_x;
+          const cellFy = -pressure * n.y + nu * rhoFluid * t_y;
+          const cellFz = -pressure * n.z + nu * rhoFluid * t_z;
+          surface.push({
+            x, y, z,
+            nx: n.x, ny: n.y, nz: n.z,
+            p: pressure,
+            fx: cellFx, fy: cellFy, fz: cellFz,
+            // Categorize the dominant axis so we can tint the face
+            // picker with a stable id (0..5).
+            faceId: Math.abs(n.x) > Math.abs(n.y) && Math.abs(n.x) > Math.abs(n.z)
+              ? (n.x > 0 ? 0 : 1)
+              : Math.abs(n.y) > Math.abs(n.z)
+                ? (n.y > 0 ? 2 : 3)
+                : (n.z > 0 ? 4 : 5),
+          });
+        }
         area++;
       }
     }
@@ -1528,6 +1585,7 @@ function computeDrag(solver, obstacleIdx) {
     area,
     reynolds: re,
     surfaceCells: Math.floor(area),
+    surface: opts.surface ? surface : undefined,
   };
 }
 
@@ -1856,7 +1914,7 @@ class CpuCompute {
   get solid() { return this.solver.solid; }
   get stepCount() { return this.solver.stepCount; }
   // Compute drag synchronously against the CPU solver.
-  computeDrag(idx) { return computeDrag(this.solver, idx); }
+  computeDrag(idx, opts) { return computeDrag(this.solver, idx, opts || {}); }
 }
 
 // WGSL: collision + streaming + macroscopic kernels. The three kernels share
@@ -5427,6 +5485,107 @@ function registerTests(tr) {
     if (typeof window.__tick !== 'function') return false;
     try { window.__tick(); return true; } catch (e) { return false; }
   });
+
+  // -- r55: surface forces --
+  // 1. computeDrag(0, { surface: true }) returns a surface[] array
+  //    whose entries each have { x, y, z, nx, ny, nz, p, fx, fy, fz,
+  //    rho, faceId, idx }. Verifies the per-cell sampling path runs
+  //    end-to-end on a real LBM solver with a cube obstacle.
+  tr.test('r55_compute_drag_with_surface_returns_per_cell', () => {
+    const config = {
+      nx: 32, ny: 32, nz: 32, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 4, y: 4, z: 4 })],
+    };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 50; i++) solver.step();
+    const result = computeDrag(solver, 0, { surface: true });
+    tr.assert(result, 'computeDrag returned a result');
+    tr.assert(Array.isArray(result.surface), 'result.surface must be an array');
+    tr.assert(result.surface.length > 0, 'surface array must have at least one cell');
+    const cell = result.surface[0];
+    tr.assert(typeof cell.x === 'number', 'cell.x is a number');
+    tr.assert(typeof cell.p === 'number', 'cell.p is a number');
+    tr.assert(typeof cell.faceId === 'number', 'cell.faceId is a number');
+    tr.assert(cell.faceId >= 0 && cell.faceId <= 5, 'faceId is in 0..5');
+  });
+
+  // 2. faceId distribution: a cube with all 6 faces exposed should
+  //    have cells spread across multiple faceIds. Most importantly,
+  //    both +x (faceId 0) and -x (faceId 1) must be present since
+  //    those are the windward/leeward faces that drive drag.
+  tr.test('r55_surface_faceid_distribution', () => {
+    const config = {
+      nx: 32, ny: 32, nz: 32, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 4, y: 4, z: 4 })],
+    };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 50; i++) solver.step();
+    const result = computeDrag(solver, 0, { surface: true });
+    const faces = new Set(result.surface.map(c => c.faceId));
+    tr.assert(faces.has(0) && faces.has(1), 'both +x and -x faces must be present (windward + leeward)');
+    tr.assert(faces.size >= 4, 'at least 4 of 6 faces should be hit, got ' + faces.size);
+  });
+
+  // 3. drawSurfaceOverlay is defined and accepts the documented
+  //    signature (ctx, surface, force, vp, w, h, gridHalf). It must
+  //    be callable without throwing on a stub.
+  tr.test('r55_surface_overlay_function_exists', () => {
+    tr.assert(typeof drawSurfaceOverlay === 'function', 'drawSurfaceOverlay must be a function');
+    const stubCtx = {
+      clearRect: () => {}, fillRect: () => {}, fillText: () => {},
+      beginPath: () => {}, moveTo: () => {}, lineTo: () => {},
+      closePath: () => {}, stroke: () => {}, fill: () => {}, arc: () => {},
+      set fillStyle(v) {}, set strokeStyle(v) {}, set lineWidth(v) {},
+      set font(v) {}, set textAlign(v) {}, set textBaseline(v) {},
+    };
+    const stubVp = {
+      // Identity-ish viewProj so projection of (0,0,0) is the center.
+      viewProj: new Float32Array([1,0,0,0, 0,-1,0,0, 0,0,1,0, 0,0,0,1]),
+    };
+    const sampleSurface = [
+      { x: 1, y: 0, z: 0, nx: 1, ny: 0, nz: 0, p: 0.001, fx: 0.001, fy: 0, fz: 0, rho: 1, faceId: 0, idx: 0 },
+    ];
+    // Should not throw.
+    drawSurfaceOverlay(stubCtx, sampleSurface, { x: 0.001, y: 0, z: 0 }, stubVp, 800, 600, [16, 16, 16]);
+    // Empty surface → early return.
+    drawSurfaceOverlay(stubCtx, [], null, stubVp, 800, 600, [16, 16, 16]);
+    // No vp → early return.
+    drawSurfaceOverlay(stubCtx, null, null, null, 800, 600, null);
+  });
+
+  // 4. rdbuSurfaceJS maps the canonical t values to the expected
+  //    RGB triples. White at t=0, red at t=+1, blue at t=-1 (per
+  //    the volumetric's rdbu shader).
+  tr.test('r55_rdbu_surface_js_colormap', () => {
+    if (typeof rdbuSurfaceJS !== 'function') throw new Error('rdbuSurfaceJS must be a function');
+    const w = rdbuSurfaceJS(0);
+    tr.assert(w[0] === 1 && w[1] === 1 && w[2] === 1, 't=0 is white');
+    const r = rdbuSurfaceJS(1);
+    tr.assert(r[0] === 1 && r[1] === 0 && r[2] === 0, 't=+1 is red');
+    const b = rdbuSurfaceJS(-1);
+    tr.assert(b[0] === 0 && b[1] === 0 && b[2] === 1, 't=-1 is blue');
+    // Out-of-range t should clamp.
+    const over = rdbuSurfaceJS(2);
+    tr.assert(over[0] === 1 && over[1] === 0 && over[2] === 0, 't>1 clamps to red');
+    const under = rdbuSurfaceJS(-2);
+    tr.assert(under[0] === 0 && under[1] === 0 && under[2] === 1, 't<-1 clamps to blue');
+  });
+
+  // 5. computeDrag without opts.surface must continue to return the
+  //    legacy shape (no surface[]). Backwards-compat guarantee.
+  tr.test('r55_compute_drag_legacy_no_surface', () => {
+    const config = {
+      nx: 32, ny: 32, nz: 32, u_inf: 0.05, rho0: 1.0, viscosity: 0.02,
+      obstacles: [obstacleBox({ x: 0, y: 0, z: 0 }, { x: 4, y: 4, z: 4 })],
+    };
+    const solver = new LbmSolver(config);
+    for (let i = 0; i < 30; i++) solver.step();
+    const result = computeDrag(solver, 0);
+    tr.assert(result, 'result returned');
+    tr.assert(!result.surface, 'legacy call has no surface[]');
+    tr.assert(result.force && typeof result.force.x === 'number', 'legacy result has force.x');
+    tr.assert(typeof result.cd === 'number', 'legacy result has cd');
+  });
 }
 
 /* =====================================================================
@@ -5641,6 +5800,255 @@ function showError(msg) {
    toggleable from the side panel; it does not interact with the
    WebGL 3D pipeline.
    ===================================================================== */
+
+/* r55: surface overlay. Drawn on a 2D canvas that covers the render
+   canvas. Reads the most recent computeDrag() surface[] sample from
+   window.__lastDragReport (refreshed every 10 frames by tick()).
+   For each face of the cube (max 6), projects the face center into
+   pixel space and draws:
+     - a small filled circle (sized by face cell count) tinted by
+       average surface pressure with the same rdbu diverging palette
+       the volumetric uses,
+     - one arrow from the face center pointing in the face's averaged
+       force vector direction with length proportional to magnitude,
+     - a magnitude label below the arrow.
+
+   Plus two big arrows next to the cube: total drag (red, along -x)
+   and total lift (green, along +y/-y).
+
+   vp = { viewProj, cameraPos, viewProj can be missing during
+   pre-apply-config startup; we early-return in that case. */
+function projectToScreen(x, y, z, vp, w, h) {
+  // vp.viewProj is a 4x4 column-major Float32Array from the camera.
+  // Multiply [x, y, z, 1] -> clip space, then perspective-divide and
+  // map to pixel coordinates (origin top-left, y down — canvas
+  // convention).
+  const m = vp.viewProj;
+  const cx = m[0]*x + m[4]*y + m[8] *z + m[12];
+  const cy = m[1]*x + m[5]*y + m[9] *z + m[13];
+  const cz = m[2]*x + m[6]*y + m[10]*z + m[14];
+  const cw = m[3]*x + m[7]*y + m[11]*z + m[15];
+  if (cw <= 0) return null;  // behind camera
+  const ndcX = cx / cw, ndcY = cy / cw;
+  // Map NDC [-1, 1] to pixel (0..w, 0..h). Y is flipped (canvas Y
+  // grows downward; NDC Y grows upward).
+  return { x: (ndcX * 0.5 + 0.5) * w, y: (1 - (ndcY * 0.5 + 0.5)) * h };
+}
+
+// rdbu(t) diverging colormap (red-white-blue). t ∈ [-1, 1]. Returns
+// [r, g, b] in 0..1. Mirrors the shader's rdbu() so face tints match
+// the volumetric colormap on slice planes.
+function rdbuSurfaceJS(t) {
+  t = Math.max(-1, Math.min(1, t));
+  if (t >= 0) {
+    // 0..1: white → red
+    return [1.0, 1.0 - t, 1.0 - t];
+  }
+  // -1..0: white → blue
+  return [1.0 + t, 1.0 + t, 1.0];
+}
+
+function drawSurfaceOverlay(ctx, surfaceData, force, vp, w, h, gridHalf) {
+  if (!vp || !vp.viewProj) return;
+  if (gridHalf === undefined) gridHalf = null;
+  ctx.clearRect(0, 0, w, h);
+
+  // Group surface cells by faceId.
+  // faceId: 0=+x, 1=-x, 2=+y, 3=-y, 4=+z, 5=-z.
+  const faceBuckets = [[], [], [], [], [], []];
+  if (surfaceData && surfaceData.length) {
+    for (let i = 0; i < surfaceData.length; i++) {
+      faceBuckets[surfaceData[i].faceId].push(surfaceData[i]);
+    }
+  }
+  if (!faceBuckets[0].length && !faceBuckets[1].length) return;
+
+  // Compute the cube's bbox in cell coords from the surface sample.
+  // The center of the cube IS the world origin (0, 0, 0) — the
+  // obstacle is centered at (nx/2, ny/2, nz/2) in cell coords, so
+  // we need to subtract gridHalf (passed in by tick) to get world.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const c of surfaceData) {
+    if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y;
+    if (c.z < minZ) minZ = c.z; if (c.z > maxZ) maxZ = c.z;
+  }
+  // Half-extents of the cube (in cell coords) along each axis.
+  const hxC = (maxX - minX + 1) / 2;
+  const hyC = (maxY - minY + 1) / 2;
+  const hzC = (maxZ - minZ + 1) / 2;
+  // Cube center in cell coords (should equal gridHalf if gridHalf is
+  // (nx/2, ny/2, nz/2)).
+  const cxC = (minX + maxX) / 2;
+  const cyC = (minY + maxY) / 2;
+  const czC = (minZ + maxZ) / 2;
+  // World-space face centers: cube is centered at world origin, so
+  // face center = (face_normal) * half_extent (in cell coords; the
+  // renderer treats cell space as world space 1:1 for the iso cube).
+  const faceCenters = [
+    { wx:  hxC, wy: 0, wz: 0, faceId: 0 },
+    { wx: -hxC, wy: 0, wz: 0, faceId: 1 },
+    { wx: 0, wy:  hyC, wz: 0, faceId: 2 },
+    { wx: 0, wy: -hyC, wz: 0, faceId: 3 },
+    { wx: 0, wy: 0, wz:  hzC, faceId: 4 },
+    { wx: 0, wy: 0, wz: -hzC, faceId: 5 },
+  ];
+
+  // Find max |pressure| across all faces so per-face t is normalized.
+  let maxAbsP = 1e-9;
+  for (let i = 0; i < surfaceData.length; i++) {
+    if (Math.abs(surfaceData[i].p) > maxAbsP) maxAbsP = Math.abs(surfaceData[i].p);
+  }
+
+  for (const fc of faceCenters) {
+    const bucket = faceBuckets[fc.faceId];
+    if (bucket.length === 0) continue;
+    const proj = projectToScreen(fc.wx, fc.wy, fc.wz, vp, w, h);
+    if (!proj) continue;
+
+    // Average per-face pressure.
+    let pSum = 0;
+    let fSumX = 0, fSumY = 0, fSumZ = 0;
+    for (const c of bucket) {
+      pSum += c.p;
+      fSumX += c.fx; fSumY += c.fy; fSumZ += c.fz;
+    }
+    const pavg = pSum / bucket.length;
+
+    // Normalize pressure to [-1, 1] for the rdbu colormap.
+    const pNorm = Math.max(-1, Math.min(1, pavg / maxAbsP));
+    const [r, g, b] = rdbuSurfaceJS(pNorm);
+
+    // Draw a colored dot at the face center. Size scales with the
+    // number of surface cells in that face (bigger face -> bigger
+    // dot).
+    const dotSize = Math.max(8, Math.min(34, 6 + Math.sqrt(bucket.length) * 1.6));
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, dotSize, 0, 2 * Math.PI);
+    ctx.fillStyle = 'rgb(' + Math.round(r*255) + ',' + Math.round(g*255) + ',' + Math.round(b*255) + ')';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Per-face force vector. Project to a 2D direction by projecting
+    // a small offset along each axis.
+    const forceMag = Math.sqrt(fSumX*fSumX + fSumY*fSumY + fSumZ*fSumZ);
+    const arrowLen = Math.min(40, 4 + forceMag * 6000);
+    if (forceMag > 1e-7) {
+      // Build an end-point by offsetting from the face center along
+      // the per-face force direction. The face center is fc.wx/wy/wz
+      // (in world coords), so the arrow tip is on the face's plane.
+      const tn = arrowLen * 0.004;  // world-units per pixel ≈ scaling
+      const endWorld = {
+        x: fc.wx + (fSumX / forceMag) * tn,
+        y: fc.wy + (fSumY / forceMag) * tn,
+        z: fc.wz + (fSumZ / forceMag) * tn,
+      };
+      const endProj = projectToScreen(endWorld.x, endWorld.y, endWorld.z, vp, w, h);
+      if (endProj) {
+        ctx.beginPath();
+        ctx.moveTo(proj.x, proj.y);
+        ctx.lineTo(endProj.x, endProj.y);
+        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Arrowhead.
+        const dx = endProj.x - proj.x, dy = endProj.y - proj.y;
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const ux = dx/len, uy = dy/len;
+        const headSize = 4;
+        ctx.beginPath();
+        ctx.moveTo(endProj.x, endProj.y);
+        ctx.lineTo(endProj.x - ux*headSize + uy*headSize*0.5, endProj.y - uy*headSize - ux*headSize*0.5);
+        ctx.lineTo(endProj.x - ux*headSize - uy*headSize*0.5, endProj.y - uy*headSize + ux*headSize*0.5);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.fill();
+      }
+    }
+    // Magnitude label below the dot.
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '10px ui-monospace,monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText((pavg.toExponential(2)).replace('e', '×10^'), proj.x, proj.y + dotSize + 2);
+  }
+
+  // Big drag arrow next to the cube (red, along -x direction).
+  // Cube's center in world coords is (0, 0, 0) for the iso-cube;
+  // arrow originates from (cube_right_edge + small offset, 0, 0)
+  // so the arrow sticks out the +x side. For a cube of half-extent
+  // h, place arrow at (+h + 1.5h, 0, 0).
+  if (force && Math.abs(force.x) > 1e-7) {
+    const h = Math.max(hxC, hyC, hzC);
+    const dragStart = projectToScreen(h * 1.5, 0, 0, vp, w, h);
+    if (dragStart) {
+      const arrowEndWorld = { x: h * 1.5 + (force.x > 0 ? -1 : 1) * Math.min(60, Math.abs(force.x) * 5000), y: 0, z: 0 };
+      const dragEnd = projectToScreen(arrowEndWorld.x, arrowEndWorld.y, arrowEndWorld.z, vp, w, h);
+      if (dragEnd) {
+        ctx.beginPath();
+        ctx.moveTo(dragStart.x, dragStart.y);
+        ctx.lineTo(dragEnd.x, dragEnd.y);
+        ctx.strokeStyle = '#ff6b6b';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        const dx = dragEnd.x - dragStart.x, dy = dragEnd.y - dragStart.y;
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const ux = dx/len, uy = dy/len;
+        const headSize = 8;
+        ctx.beginPath();
+        ctx.moveTo(dragEnd.x, dragEnd.y);
+        ctx.lineTo(dragEnd.x - ux*headSize + uy*headSize*0.5, dragEnd.y - uy*headSize - ux*headSize*0.5);
+        ctx.lineTo(dragEnd.x - ux*headSize - uy*headSize*0.5, dragEnd.y - uy*headSize + ux*headSize*0.5);
+        ctx.closePath();
+        ctx.fillStyle = '#ff6b6b';
+        ctx.fill();
+        // Label.
+        ctx.fillStyle = '#ff6b6b';
+        ctx.font = 'bold 11px ui-monospace,monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Fx = ' + force.x.toFixed(4), (dragStart.x + dragEnd.x)/2, (dragStart.y + dragEnd.y)/2 - 12);
+      }
+    }
+  }
+  // Big lift arrow (green, along y direction). Force.y is upward in
+  // world coords. Place it at (-2h, 0, 0) (left of cube).
+  if (force && Math.abs(force.y) > 1e-7) {
+    const h = Math.max(hxC, hyC, hzC);
+    const liftStart = projectToScreen(-h * 2.0, 0, 0, vp, w, h);
+    if (liftStart) {
+      const arrowEndWorld = { x: -h * 2.0, y: (force.y > 0 ? 1 : -1) * Math.min(60, Math.abs(force.y) * 5000), z: 0 };
+      const liftEnd = projectToScreen(arrowEndWorld.x, arrowEndWorld.y, arrowEndWorld.z, vp, w, h);
+      if (liftEnd) {
+        ctx.beginPath();
+        ctx.moveTo(liftStart.x, liftStart.y);
+        ctx.lineTo(liftEnd.x, liftEnd.y);
+        ctx.strokeStyle = '#51cf66';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        const dx = liftEnd.x - liftStart.x, dy = liftEnd.y - liftStart.y;
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const ux = dx/len, uy = dy/len;
+        const headSize = 8;
+        ctx.beginPath();
+        ctx.moveTo(liftEnd.x, liftEnd.y);
+        ctx.lineTo(liftEnd.x - ux*headSize + uy*headSize*0.5, liftEnd.y - uy*headSize - ux*headSize*0.5);
+        ctx.lineTo(liftEnd.x - ux*headSize - uy*headSize*0.5, liftEnd.y - uy*headSize + ux*headSize*0.5);
+        ctx.closePath();
+        ctx.fillStyle = '#51cf66';
+        ctx.fill();
+        ctx.fillStyle = '#51cf66';
+        ctx.font = 'bold 11px ui-monospace,monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Fy = ' + force.y.toFixed(4), (liftStart.x + liftEnd.x)/2 + 14, (liftStart.y + liftEnd.y)/2);
+      }
+    }
+  }
+}
+
 function drawSlicePlane(ctx, canvas, backend, fieldMode) {
   const solver = backend.solver;
   if (!solver) return;
@@ -6043,6 +6451,14 @@ async function main() {
   let simStepsPerSecond = 0;
   let lastStatsT = performance.now();
   let dragTimer = 0;
+  // r55: surface arrows / face-pressure visualization. When
+  // surfaceArrowsVisible is true, the render loop reads
+  // window.__lastDragReport.surface[] to (a) color cube faces by
+  // surface pressure and (b) draw tiny pressure arrows on each
+  // surface cell. Bigger arrows next to the cube show the total
+  // drag (red, along wind) and lift (green, vertical) force vectors.
+  let surfaceArrowsVisible = false;
+  let surfaceForceArrowsVisible = true;  // sub-toggle for the big arrow
 
   // r38: smoke layer state. Bound below to the toggle / opacity / decay
   // controls. Default ON so the user sees the feature the moment they
@@ -6553,6 +6969,12 @@ async function main() {
 
   // r54: expose for tests.
   window.__frameBudget = { applyFrameBudget, get state() { return { frameBudgetHz, visible }; } };
+  // r55: surface overlay handler + report accessor for tests.
+  window.__surfaceForces = {
+    get visible() { return surfaceArrowsVisible; },
+    set visible(v) { surfaceArrowsVisible = !!v; },
+    get lastReport() { return window.__lastDragReport || null; },
+  };
 
   // r44: slice plane toggle. The overlay is drawn every frame in the
   // render loop when enabled; no reset.
@@ -6573,6 +6995,20 @@ async function main() {
   if (ribbonToggle) {
     ribbonToggle.addEventListener('change', () => {
       ribbonEnabled = ribbonToggle.checked;
+    });
+  }
+  // r55: surface-forces toggle. When ON, the 2D surface overlay is
+  // shown and tick() re-samples computeDrag with opts.surface so it
+  // has fresh per-cell data to draw. When OFF, the overlay canvas is
+  // hidden to save a single 2D canvas redraw per frame.
+  const surfaceToggle = document.getElementById('surface-forces-toggle');
+  if (surfaceToggle) {
+    surfaceToggle.addEventListener('change', () => {
+      surfaceArrowsVisible = surfaceToggle.checked;
+      const surfaceOverlay = document.getElementById('surface-overlay');
+      if (surfaceOverlay) {
+        surfaceOverlay.style.display = surfaceArrowsVisible ? 'block' : 'none';
+      }
     });
   }
   const ribbonWidthSlider = document.getElementById('ribbon-width-slider');
@@ -7171,7 +7607,14 @@ async function main() {
     if (dragTimer >= 10) {
       dragTimer = 0;
       try {
-        dragReport = backend.computeDrag ? backend.computeDrag(0) : null;
+        // r55: when the surface-arrows toggle is on, opt-into per-cell
+        // surface sampling. The computeDrag code path walks every
+        // surface cell anyway to compute totals, so this is a small
+        // additional cost (~7% on a 24³ cube) BUT only at the 2 Hz
+        // throttle (dragTimer >= 10), not every frame.
+        dragReport = backend.computeDrag
+          ? backend.computeDrag(0, surfaceArrowsVisible ? { surface: true } : {})
+          : null;
         // r33: record Cd sample for the live plot. Sync path.
         if (dragReport && typeof dragReport.cd === 'number') {
           recordCdSample(parseFloat(uInfInput.value), dragReport.cd);
@@ -7189,6 +7632,13 @@ async function main() {
               recordCdStrip(r.cd);
             }
           });
+        }
+        // r55: expose latest dragReport (with surface data) so the
+        // renderer / tests can read it. We use window.__lastDragReport
+        // instead of mutating backend because computeDrag returns a
+        // fresh object each call.
+        if (dragReport && surfaceArrowsVisible) {
+          window.__lastDragReport = dragReport;
         }
       } catch (e) { /* ignore */ }
     }
@@ -7283,6 +7733,17 @@ async function main() {
       }
       const aspect = canvas.clientWidth / canvas.clientHeight;
       const vp = camera.viewProj(aspect);
+      // r55: cache vp + canvas dims so the surface overlay can read
+      // them during its 2D-canvas draw call (which runs after this
+      // tick() body returns).
+      window.__windsurfLastVp = {
+        viewProj: vp.viewProj,
+        cameraPos: vp.cameraPos,
+        invViewProj: vp.invViewProj,
+        canvasW: canvas.clientWidth,
+        canvasH: canvas.clientHeight,
+        gridHalf: [spec.nx / 2, spec.ny / 2, spec.nz / 2],
+      };
       if (showVolumetric) {
         renderer.draw({
           invViewProj: vp.invViewProj,
@@ -7364,6 +7825,45 @@ async function main() {
       // WebGL volumetric without interfering with the 3D pipeline.
       if (sliceEnabled && sliceCtx && backend.solver) {
         drawSlicePlane(sliceCtx, sliceCanvas, backend, fieldMode);
+      }
+      // r55: surface-forces overlay. Drawn on a separate 2D canvas
+      // (covering the whole render area) so it can draw arrows,
+      // colored dots, and text labels without involving WebGL. The
+      // read-only dragReport is sampled from window.__lastDragReport
+      // (refreshed by tick() every 10 frames when this is on).
+      if (surfaceArrowsVisible) {
+        const surfaceCanvas = document.getElementById('surface-overlay');
+        if (surfaceCanvas) {
+          // Make sure the overlay's pixel buffer matches the current
+          // canvas size (cheap; if dimensions are unchanged it's a
+          // no-op).
+          if (surfaceCanvas.width !== canvas.clientWidth
+            || surfaceCanvas.height !== canvas.clientHeight) {
+            surfaceCanvas.width = canvas.clientWidth;
+            surfaceCanvas.height = canvas.clientHeight;
+            surfaceCanvas.style.display = 'block';
+          }
+          const sctx = surfaceCanvas.getContext('2d');
+          const report = window.__lastDragReport;
+          const vpc = window.__windsurfLastVp;
+          if (sctx && vpc) {
+            // For the first frame before computeDrag has run with
+            // opts.surface, surface is undefined; show empty
+            // overlay rather than throw.
+            drawSurfaceOverlay(
+              sctx,
+              report && report.surface ? report.surface : null,
+              report && report.force ? report.force : null,
+              vpc,
+              surfaceCanvas.width,
+              surfaceCanvas.height,
+              vpc.gridHalf
+            );
+          }
+        }
+      } else {
+        const surfaceCanvas = document.getElementById('surface-overlay');
+        if (surfaceCanvas) surfaceCanvas.style.display = 'none';
       }
     } catch (e) {
       console.error('Render error:', e);
