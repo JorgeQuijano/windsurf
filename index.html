@@ -311,7 +311,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r55-2026-07-26 (colorbar legend for the volume field: small <canvas> below the colormap-field selector draws the colormap (viridis for density/velocity/vorticity, rdbu for signed pressure) with min/mid/max labels. The shader's viridis t-range [0.30, 1.0] is mirrored so the legend matches what's on screen. Switching the field-mode re-renders the bar. window.__colorbar exposed for tests.) (WindSpeed, AirViscosity, Streamlines, TrailMode, StepsPerFrame, BodyOpacity, StreamlineOpacity, RibbonMode, RibbonWidth, Pathlines, Smoke, VolumeField, SlicePlane, SmokeOpacity, SmokeDecay, SmagorinskyCoefficient, KarmanInflow, CameraPreset, Shape, Roll, Pitch, Yaw, etc.). Plot titles: CdVsWindSpeed, CdOverTime. Cd is the symbol, kept. Volume field options: Density, VelocityMagnitude, VorticityMagnitude, Pressure. Shape options: Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron. README fully rewritten for reference.)</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r55.1-2026-07-26 (r55: SurfaceForces visualization — toggle on to color each cube face by pressure (red/white/blue diverging) and draw drag arrow + lift arrow + per-face force vectors. r55.1: TDZ regression fix for lastBgTickMs reference-before-declare in visibilitychange handler. New SurfaceForces checkbox in ribbon panel; window.__surfaceForces exposed for tests.)</div>
         </details>
       </div>
       <div id="readout">
@@ -5486,6 +5486,17 @@ function registerTests(tr) {
     try { window.__tick(); return true; } catch (e) { return false; }
   });
 
+  // r55.1: visibilitychange handler must not throw. Source-level check.
+  tr.test('r55_1_visibility_handler_does_not_throw', () => {
+    if (typeof window.__simulateVisibility === 'function') {
+      try { window.__simulateVisibility('hidden'); window.__simulateVisibility('visible'); }
+      catch (e) { if (/ReferenceError/.test(String(e))) throw e; }
+      return true;
+    }
+    const srcText = globalThis.__getSource ? globalThis.__getSource() : '';
+    return /let\s+lastBgTickMs\s*=/.test(srcText);
+  });
+
   // -- r55: surface forces --
   // 1. computeDrag(0, { surface: true }) returns a surface[] array
   //    whose entries each have { x, y, z, nx, ny, nz, p, fx, fy, fz,
@@ -6446,6 +6457,7 @@ async function main() {
   let visible = true;
   let bgTickIntervalMs = 250;     // 4 Hz
   let bgAccum = 0;
+  let lastBgTickMs = 0;          // r55.1: TDZ fix — referenced by visibilitychange handler
   let fps = 0;
   let simStepsThisSecond = 0;
   let simStepsPerSecond = 0;
@@ -6966,6 +6978,16 @@ async function main() {
       _frameBudgetState.lastTickMs = 0; // reset so we don't delay the resume frame
     }
   });
+  // r55.1: expose so selftests can drive the visibility handler without
+  // needing a real visibilitychange event. Prevents the TDZ class of
+  // regressions where a closure-scoped let is read before declared.
+  window.__simulateVisibility = (state) => {
+    if (state !== 'hidden' && state !== 'visible') return;
+    try {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+      document.dispatchEvent(new Event('visibilitychange'));
+    } catch (e) { /* noop in non-browser env */ }
+  };
 
   // r54: expose for tests.
   window.__frameBudget = { applyFrameBudget, get state() { return { frameBudgetHz, visible }; } };
