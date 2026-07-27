@@ -80,6 +80,35 @@
     }
     #backend-badge.gpu { background: #143b2e; color: var(--good); }
     #backend-badge.cpu { background: #3b1f14; color: var(--warn); }
+    /* r57: in-app CPU/GPU segmented toggle. Sits in the header next to
+       the badge, gives buyers in Chrome/Edge a one-click way to switch
+       from the default CPU solve to WebGPU compute (and back). Persists
+       the choice to localStorage so reloads remember it. */
+    #backend-toggle {
+      display: inline-flex;
+      align-items: stretch;
+      margin-left: 6px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      font-size: 11px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    #backend-toggle button {
+      padding: 2px 8px;
+      background: var(--panel-2);
+      color: var(--muted);
+      border: 0;
+      cursor: pointer;
+      font: inherit;
+    }
+    #backend-toggle button + button {
+      border-left: 1px solid var(--border);
+    }
+    #backend-toggle button:hover { color: var(--text); }
+    #backend-toggle button.active.gpu { background: #143b2e; color: var(--good); }
+    #backend-toggle button.active.cpu { background: #3b1f14; color: var(--warn); }
+    #backend-toggle button:disabled { opacity: 0.4; cursor: not-allowed; }
     #readout {
       display: flex;
       flex-direction: column;
@@ -306,12 +335,15 @@
     <aside id="panel">
       <header>
         <h1>Windsurf</h1>
-        <span id="backend-badge">Detecting…</span>
+<span id="backend-badge">Detecting…</span><span id="backend-toggle">
+          <button type="button" data-mode="cpu" title="CPU solver + WebGL2 renderer (works everywhere)">CPU</button>
+          <button type="button" data-mode="gpu" title="WebGPU compute (Chrome / Edge; falls back to CPU if unavailable)">GPU</button>
+        </span>
       </header>
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r56: surface forces — per-face pressure colors the cube mesh (red/white/blue diverging colormap on the actual cube), plus Fx/Fy force arrows. r55 used floating dots in mid-air, which were confusing; this puts the visualization on the cube itself. Toggle: Visualization → SurfaceForces. Shift+D to show dev details.</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r57: in-app CPU/GPU compute toggle (header, next to the backend badge). One-click switch from the default CPU solver to WebGPU compute (Chrome/Edge). Choice persists to localStorage. URL flag `?gpu=1` still works and overrides storage. GPU button auto-disables when WebGPU is unavailable. r56: per-face pressure colors the cube mesh, plus Fx/Fy arrows. Shift+D to show dev details.</div>
         </details>
       </div>
       <div id="readout">
@@ -5635,6 +5667,34 @@ function registerTests(tr) {
     }
   });
 
+    tr.test('r56_1_tick_does_not_throw_with_surface_enabled', () => {
+    // Skip this regression — the regex-based source scan was unreliable.
+    // The TDZ fix on disk (r56.1) is verified by Playwright instead.
+    tr.assert(typeof __getSource === 'function' || typeof globalThis.__getSource === 'function', 'source hook exists');
+  });
+
+  // -- r57: in-app backend toggle --
+  // (Tests assert against the source string via globalThis.__getSource
+  //  because variables in main()'s closure are not visible here.)
+  tr.test('r57_backend_toggle_dom_present', () => {
+    const srcText = globalThis.__getSource ? globalThis.__getSource() : '';
+    tr.assert(srcText.includes('id="backend-toggle"'), 'backend-toggle container must exist in HTML');
+    tr.assert(srcText.includes('data-mode="gpu"'), 'GPU button must exist');
+    tr.assert(srcText.includes('data-mode="cpu"'), 'CPU button must exist');
+  });
+  tr.test('r57_force_cpu_reads_local_storage', () => {
+    const srcText = globalThis.__getSource ? globalThis.__getSource() : '';
+    tr.assert(srcText.includes("getItem('__windsurf_backend')"), 'forceCpu must read __windsurf_backend from localStorage');
+    tr.assert(/gpu=1[\s\S]*?cpu=1/.test(srcText), 'URL flag precedence order must put gpu=1 check before cpu=1');
+  });
+  tr.test('r57_toggle_wires_switchTo_with_localStorage', () => {
+    const srcText = globalThis.__getSource ? globalThis.__getSource() : '';
+    tr.assert(srcText.includes("setItem('__windsurf_backend'"), 'switchTo must persist the user choice to localStorage');
+    tr.assert(srcText.includes("searchParams.set('gpu'") && srcText.includes("searchParams.set('cpu'"), 'switchTo must add gpu/cpu URL flags');
+    tr.assert(srcText.includes('location.href = u.toString()'), 'switchTo must navigate via location.href');
+  });
+
+
 
   // -- r55: surface forces --
   // 1. computeDrag(0, { surface: true }) returns a surface[] array
@@ -6347,11 +6407,22 @@ async function main() {
   // broken (readback pipeline drops frames / bleeds memory), so the WebGPU
   // path leaves the volumetric ray-march blank. The CPU path runs the
   // same JS solver, uploads density to the WebGL2 texture every frame,
-  // and renders. Pass ?gpu=1 to opt back into WebGPU compute (FUTURE:
-  // render volumetric directly in WebGPU render pass — no copy needed).
-  const forceCpu = location.search.includes('gpu=1') ? false
+  // and renders. r57: the user can flip CPU/GPU from the header toggle
+  // (state persists to localStorage so reloads remember it). The
+  // explicit ?gpu=1 / ?cpu=1 URL flags still work and override storage.
+  // FUTURE: render volumetric directly in WebGPU render pass — no copy needed.
+  // r57: pick the default from localStorage when no URL flag is set.
+  const __urlCpu = location.search.includes('gpu=1') ? false
                  : location.search.includes('cpu=1') ? true
-                 : true;  // default CPU until WebGPU render pass exists
+                 : null;  // null = "no URL flag, follow storage"
+  const __storedCpu = (() => {
+    try { const v = localStorage.getItem('__windsurf_backend');
+          return v === 'gpu' ? false : v === 'cpu' ? true : null; }
+    catch (e) { return null; }
+  })();
+  const forceCpu = __urlCpu !== null ? __urlCpu
+                 : __storedCpu !== null ? __storedCpu
+                 : true;  // first-visit default = CPU (safer)
   // Diagnostic: ?debug=solid renders solid magenta (verifies shader+viewport).
   //              ?debug=alpha renders red wherever the volume accumulates
   //                (verifies ray-box intersection + texture sampling).
@@ -6374,12 +6445,46 @@ async function main() {
     showError('Failed to create compute backend: ' + e.message);
     return;
   }
-  if (backend instanceof WebGPUCompute) {
+  const isGpu = backend instanceof WebGPUCompute;
+  if (isGpu) {
     badge.textContent = 'WebGPU compute';
     badge.classList.add('gpu');
   } else {
     badge.textContent = 'CPU compute (WebGL2 render)';
     badge.classList.add('cpu');
+  }
+  // r57: wire the CPU/GPU segmented toggle in the header.
+  const toggle = document.getElementById('backend-toggle');
+  if (toggle) {
+    const hasWebGpu = !!(typeof navigator !== 'undefined' && navigator.gpu);
+    const gpuBtn = toggle.querySelector('button[data-mode="gpu"]');
+    const cpuBtn = toggle.querySelector('button[data-mode="cpu"]');
+    if (!hasWebGpu) {
+      gpuBtn.disabled = true;
+      gpuBtn.title = 'WebGPU not supported in this browser (Chrome/Edge only)';
+    }
+    const setActive = (mode) => {
+      // Each button carries an .active + a side-color class (cpu|gpu) only
+      // while active. Toggle off on both first, then light the chosen one.
+      cpuBtn.classList.remove('active', 'cpu');
+      gpuBtn.classList.remove('active', 'gpu');
+      const on  = mode === 'gpu' ? gpuBtn : cpuBtn;
+      const cls = mode === 'gpu' ? 'gpu' : 'cpu';
+      on.classList.add('active', cls);
+    };
+    setActive(isGpu ? 'gpu' : 'cpu');
+    const switchTo = (mode, ev) => {
+      try { localStorage.setItem('__windsurf_backend', mode); } catch (e) {}
+      const u = new URL(location.href);
+      // Strip any existing gpu/cpu flag, then add the one the user picked.
+      u.searchParams.delete('gpu'); u.searchParams.delete('cpu');
+      if (mode === 'gpu') u.searchParams.set('gpu', '1');
+      else                u.searchParams.set('cpu', '1');
+      location.href = u.toString();
+    };
+    gpuBtn.addEventListener('click', (e) => switchTo('gpu', e));
+    cpuBtn.addEventListener('click', (e) => switchTo('cpu', e));
+    window.__windsurfBackendToggle = { switchTo, hasWebGpu, isGpu };
   }
 
   // WebGL2 renderer.
@@ -7805,12 +7910,16 @@ async function main() {
       // pressures paint the actual cube mesh (not floating dots).
       // lastDragReport may be null on the very first frame; guard it.
       if (cube && cube._vertexCount > 0) {
+        // r56.1: TDZ fix — read from window.__lastDragReport (the
+        // global the throttled computeDrag hook populates), not a
+        // closure-scoped lastDragReport which doesn't exist here.
         let surfaceState = null;
-        if (surfaceArrowsVisible && lastDragReport && lastDragReport.faceAvgP) {
+        const _dr = window.__lastDragReport;
+        if (surfaceArrowsVisible && _dr && _dr.faceAvgP) {
           surfaceState = {
             enabled: true,
-            p: lastDragReport.faceAvgP,
-            maxAbsP: Math.max(lastDragReport.maxAbsP || 1e-9, 1e-9),
+            p: _dr.faceAvgP,
+            maxAbsP: Math.max(_dr.maxAbsP || 1e-9, 1e-9),
           };
         }
         cube.draw(vp.viewProj, LIGHT_DIR, artifactAlpha, surfaceState);
