@@ -109,6 +109,9 @@
     #backend-toggle button.active.gpu { background: #143b2e; color: var(--good); }
     #backend-toggle button.active.cpu { background: #3b1f14; color: var(--warn); }
     #backend-toggle button:disabled { opacity: 0.4; cursor: not-allowed; }
+    /* r57: warn state — GPU active but requestAdapter returned null
+       (e.g. headless Chrome). Yellow tint signals the fallback. */
+    #backend-toggle button.active.gpu.fallback { background: #3b2f14; color: var(--warn); }
     #readout {
       display: flex;
       flex-direction: column;
@@ -343,7 +346,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r57: in-app CPU/GPU compute toggle (header, next to the backend badge). One-click switch from the default CPU solver to WebGPU compute (Chrome/Edge). Choice persists to localStorage. URL flag `?gpu=1` still works and overrides storage. GPU button auto-disables when WebGPU is unavailable. r56: per-face pressure colors the cube mesh, plus Fx/Fy arrows. Shift+D to show dev details.</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r57: in-app CPU/GPU compute toggle (header, next to the backend badge). One-click switch from the default CPU solver to WebGPU compute (Chrome/Edge). Choice persists to localStorage. URL flag `?gpu=1` still works and overrides storage. When WebGPU is requested but the browser has no usable adapter (e.g. headless Chrome), the GPU button turns yellow and the badge reads "GPU unavailable — CPU fallback" so the fallback is transparent, not silent. r56: per-face pressure colors the cube mesh, plus Fx/Fy arrows. Shift+D to show dev details.</div>
         </details>
       </div>
       <div id="readout">
@@ -1877,18 +1880,29 @@ function runSphere(steps) {
 */
 
 async function createComputeBackend(spec, forceCpu) {
+  // r57: report WHY we fell back to CPU so the badge can show a clear
+  // "GPU unavailable" state instead of silent fallback. Returned in the
+  // 2-tuple alongside the backend instance.
   if (!forceCpu && navigator.gpu) {
     try {
       const adapter = await navigator.gpu.requestAdapter();
       if (adapter) {
         const device = await adapter.requestDevice();
-        return new WebGPUCompute(device, spec);
+        return { backend: new WebGPUCompute(device, spec), gpuRequested: true, gpuAvailable: true };
       }
+      // r57: navigator.gpu exists but requestAdapter returned null —
+      // typical in headless Chrome or browsers without WebGPU enabled.
+      console.warn('[windsurf] WebGPU requestAdapter returned null — falling back to CPU.');
+      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false };
     } catch (e) {
-      console.warn('WebGPU init failed, falling back to CPU:', e);
+      console.warn('[windsurf] WebGPU init failed, falling back to CPU:', e);
+      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false };
     }
   }
-  return new CpuCompute(spec);
+  const reason = !navigator.gpu ? 'no navigator.gpu (Safari/Firefox/headless)'
+               : forceCpu ? 'forced via URL/storage'
+               : 'unknown';
+  return { backend: new CpuCompute(spec), gpuRequested: false, gpuAvailable: !!navigator.gpu, reason };
 }
 
 class CpuCompute {
@@ -6430,10 +6444,13 @@ async function main() {
   if (location.search.includes('debug=solid')) debugMode = 1;
   if (location.search.includes('debug=alpha')) debugMode = 2;
   window.__windsurfDebugMode = debugMode;
-  let backend;
+  let backend, gpuRequested, gpuAvailable;
   try {
-    backend = await createComputeBackend(spec, forceCpu);
+    // r57: returns { backend, gpuRequested, gpuAvailable, reason } now.
+    ({ backend, gpuRequested, gpuAvailable } = await createComputeBackend(spec, forceCpu));
     window.__windsurfBackend = backend;
+    window.__windsurfGpuAvailable = gpuAvailable;
+    window.__windsurfGpuRequested = gpuRequested;
     // r49: expose the pathline burst so external tests can inspect
     // the particle count. Recomputed on every step so the count
     // stays current.
@@ -6449,6 +6466,10 @@ async function main() {
   if (isGpu) {
     badge.textContent = 'WebGPU compute';
     badge.classList.add('gpu');
+  } else if (gpuRequested && !gpuAvailable) {
+    badge.textContent = 'GPU unavailable — CPU fallback';
+    badge.classList.add('cpu');
+    badge.title = 'You asked for GPU, but this browser does not provide a working WebGPU adapter. Falling back to CPU.';
   } else {
     badge.textContent = 'CPU compute (WebGL2 render)';
     badge.classList.add('cpu');
@@ -6462,15 +6483,27 @@ async function main() {
     if (!hasWebGpu) {
       gpuBtn.disabled = true;
       gpuBtn.title = 'WebGPU not supported in this browser (Chrome/Edge only)';
+    } else if (window.__windsurfGpuAvailable === false) {
+      // r57: navigator.gpu exists but requestAdapter returned null
+      // (headless Chrome, browsers without WebGPU enabled, etc.). Let
+      // the user click anyway — it will fall back to CPU.
+      gpuBtn.title = 'Clicking will switch and reload — GPU will fall back to CPU if browser has no usable WebGPU adapter';
+    } else {
+      gpuBtn.title = 'Switch to WebGPU compute (Chrome/Edge)';
     }
     const setActive = (mode) => {
       // Each button carries an .active + a side-color class (cpu|gpu) only
       // while active. Toggle off on both first, then light the chosen one.
       cpuBtn.classList.remove('active', 'cpu');
-      gpuBtn.classList.remove('active', 'gpu');
+      gpuBtn.classList.remove('active', 'gpu', 'fallback');
       const on  = mode === 'gpu' ? gpuBtn : cpuBtn;
       const cls = mode === 'gpu' ? 'gpu' : 'cpu';
       on.classList.add('active', cls);
+      // r57: if user picked GPU but the browser has no working adapter,
+      // visually mark the GPU button as fallback (yellow).
+      if (mode === 'gpu' && window.__windsurfGpuAvailable === false) {
+        gpuBtn.classList.add('fallback');
+      }
     };
     setActive(isGpu ? 'gpu' : 'cpu');
     const switchTo = (mode, ev) => {
