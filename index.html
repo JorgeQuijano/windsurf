@@ -46,8 +46,25 @@
       display: block;
       background: var(--bg);
       cursor: grab;
+      /* r58: explicit placement so the three.js canvas (also placed at
+         1/1) overlaps it instead of pushing it into the panel column
+         (definite-positioned items are placed before auto-placed ones). */
+      grid-row: 1;
+      grid-column: 1;
     }
     #render-canvas:active { cursor: grabbing; }
+    /* r58: three.js scene canvas — shares the first grid cell with the
+       volumetric canvas (same row/column), transparent, stacked above it
+       in DOM order. Hidden until the three.js module finishes loading. */
+    #three-canvas {
+      width: 100%;
+      height: 100%;
+      display: none;
+      grid-row: 1;
+      grid-column: 1;
+      cursor: grab;
+    }
+    #three-canvas:active { cursor: grabbing; }
     #panel {
       background: var(--panel);
       border-left: 1px solid var(--border);
@@ -325,6 +342,7 @@
 <body>
   <div id="app">
     <canvas id="render-canvas"></canvas>
+    <canvas id="three-canvas"></canvas>
     <canvas id="slice-canvas" style="position:absolute;left:12px;top:88px;width:300px;height:300px;background:rgba(8,10,18,0.85);border:1px solid rgba(255,255,255,0.18);border-radius:4px;display:none;pointer-events:none"></canvas>
     <!-- r55: surface-arrows overlay. Covers the whole render canvas
          (rendered ON TOP via absolute position + z-index). When the
@@ -5810,6 +5828,50 @@ function registerTests(tr) {
     tr.assert(result.force && typeof result.force.x === 'number', 'legacy result has force.x');
     tr.assert(typeof result.cd === 'number', 'legacy result has cd');
   });
+
+  // r58: three.js presentation layer (optional enhancement). These pass
+  // trivially when the layer is absent (Node runner, ?three=0, CDN
+  // offline, or module still loading at selftest time) — they assert
+  // real state only when the layer reports active.
+  const __threeActive = () =>
+    typeof window !== 'undefined' &&
+    window.__windsurfThreeLayer &&
+    window.__windsurfThreeLayer.active === true;
+  const __waitFrames = async (n) => {
+    for (let i = 0; i < n; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+  };
+  tr.test('r58_three_layer_active_and_rendering', async () => {
+    if (!__threeActive()) return;
+    const L = window.__windsurfThreeLayer;
+    tr.assert(L.canvas && L.canvas.clientWidth > 0, 'three canvas must be laid out');
+    if (!L.stats.frameCount) await __waitFrames(3);
+    tr.assert(L.stats.frameCount >= 1, 'layer must have rendered at least one frame');
+    tr.assert(L.stats.triangles > 0, 'artifact mesh must draw triangles');
+  });
+  tr.test('r58_three_obstacle_matches_solver_transform', async () => {
+    if (!__threeActive()) return;
+    const obs = window.__lastObstacle;
+    tr.assert(!!obs, 'solver obstacle must be exposed as window.__lastObstacle');
+    const g = window.__windsurfThreeLayer.obstacleGroup;
+    tr.assert(!!g, 'layer must expose its obstacle group');
+    const p = obs.transform.position, s = obs.transform.scale;
+    tr.assert(
+      Math.abs(g.position.x - p.x) < 1e-6 && Math.abs(g.position.y - p.y) < 1e-6 && Math.abs(g.position.z - p.z) < 1e-6,
+      'obstacle group position must match the solver transform',
+    );
+    tr.assert(
+      Math.abs(g.scale.x - s.x) < 1e-6 && Math.abs(g.scale.y - s.y) < 1e-6 && Math.abs(g.scale.z - s.z) < 1e-6,
+      'obstacle group scale must match the solver transform',
+    );
+  });
+  tr.test('r58_three_flow_lines_populate', async () => {
+    if (!__threeActive()) return;
+    const L = window.__windsurfThreeLayer;
+    if (!L.stats.frameCount) await __waitFrames(3);
+    tr.assert(L.stats.streamVerts > 0, 'streamline geometry must be non-empty once the solver has run');
+  });
 }
 
 /* =====================================================================
@@ -6321,6 +6383,15 @@ function drawSlicePlane(ctx, canvas, backend, fieldMode) {
 
 async function main() {
   const canvas = document.getElementById('render-canvas');
+  // r58: optional three.js presentation layer. A transparent second WebGL
+  // canvas is stacked over the volumetric canvas and takes over the
+  // obstacle + flow-line pass (lit PBR artifact, depth-correct lines,
+  // glow pathline heads). `threeLayer`/`threeMode` are owned here so
+  // applyConfig()/tick()/resize() can branch on them; the layer itself is
+  // built by the deferred module (window.__windsurfInitThree).
+  const threeCanvasEl = document.getElementById('three-canvas');
+  let threeLayer = null;
+  let threeMode = false;
   const badge = document.getElementById('backend-badge');
   const fpsEl = document.getElementById('fps');
   const spsEl = document.getElementById('sps');
@@ -6840,6 +6911,13 @@ async function main() {
       } else {
         cube._vertexCount = 0;
       }
+    }
+    // r58: expose the current obstacle for the three.js layer (which may
+    // initialize later than this first applyConfig call) and push live
+    // shape/rotation changes into it the moment it is active.
+    window.__lastObstacle = config.obstacles[0] || null;
+    if (threeLayer && threeLayer.setObstacle) {
+      threeLayer.setObstacle(window.__lastObstacle);
     }
   }
   // r33: wind speed display unit toggle (lattice | km/h | mph | knots).
@@ -7942,6 +8020,23 @@ async function main() {
       // r56: pass surfaceForces state to the cube shader so per-face
       // pressures paint the actual cube mesh (not floating dots).
       // lastDragReport may be null on the very first frame; guard it.
+      // r58: when the three.js scene layer is active it takes over the
+      // artifact + flow-line pass on its own transparent canvas (stacked
+      // above the volumetric canvas, which still renders below). The
+      // legacy cube + line renderers stay fully wired and are used for
+      // ?three=0 / CDN-offline / init-failure.
+      if (threeMode && threeLayer && threeLayer.active) {
+        threeLayer.frame({
+          cameraPos: vp.cameraPos,
+          artifactAlpha,
+          backend,
+          tracer,
+          pathlineBurst,
+          pathlineEnabled,
+          playing,
+          stepOnce,
+        });
+      } else {
       if (cube && cube._vertexCount > 0) {
         // r56.1: TDZ fix — read from window.__lastDragReport (the
         // global the throttled computeDrag hook populates), not a
@@ -7995,6 +8090,8 @@ async function main() {
           lines.updateSegment(2, new Float32Array(0));
         }
         lines.draw(vp.viewProj);
+      }
+      // r44: slice plane overlay
       }
       // r44: slice plane overlay — 2D cross-section at y = ny/2.
       // Renders the current colormap field as a heatmap with quiver
@@ -8080,9 +8177,70 @@ async function main() {
   function resize() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     renderer.resize(Math.max(1, w), Math.max(1, h));
+    if (threeLayer && threeLayer.resize) {
+      threeLayer.resize(Math.max(1, w), Math.max(1, h));
+    }
   }
   window.addEventListener('resize', resize);
   resize();
+
+  // r58: init entry point for the three.js presentation layer. The
+  // deferred module calls window.__windsurfInitThree(THREE, addons)
+  // once main() has finished wiring (see the readiness event below).
+  function initThreeLayer(THREE, addons) {
+    if (threeMode || threeLayer || !threeCanvasEl) return;
+    if (location.search.includes('three=0')) return;
+    const create = window.__windsurfCreateThreeLayer;
+    if (typeof create !== 'function') return; // module not finished exporting
+    try {
+      threeLayer = create(THREE, addons, { canvas: threeCanvasEl });
+      threeLayer.setObstacle(window.__lastObstacle || null);
+      // Route orbit/zoom gestures on the new top canvas to the SAME
+      // camera object the legacy canvas used (single source of truth:
+      // presets, R-reset, floor clamp and the volume ray-march all keep
+      // working because vp still comes from that camera).
+      const tc = threeCanvasEl;
+      tc.addEventListener('mousedown', (e) => {
+        let lastX = e.clientX, lastY = e.clientY;
+        const move = (ev) => {
+          camera.drag(ev.clientX - lastX, ev.clientY - lastY);
+          lastX = ev.clientX; lastY = ev.clientY;
+        };
+        const up = () => {
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+      });
+      tc.addEventListener('wheel', (e) => {
+        camera.wheel(e.deltaY);
+        e.preventDefault();
+      }, { passive: false });
+      tc.style.display = 'block';
+      resize();
+      threeMode = true;
+      window.__windsurfThreeLayer = threeLayer;
+      window.__windsurfThreeMode = true;
+      if (badge) {
+        badge.textContent += ' · three.js scene';
+        badge.classList.add('three');
+      }
+      console.log('[windsurf] three.js scene layer active (?three=0 reverts to legacy renderer)');
+    } catch (e) {
+      console.warn('[windsurf] three.js layer init failed — legacy renderer stays active:', e);
+      threeLayer = null;
+      threeMode = false;
+      if (threeCanvasEl) threeCanvasEl.style.display = 'none';
+    }
+  }
+  window.__windsurfInitThree = initThreeLayer;
+  window.__windsurfCamera = camera;
+  // r58: signal the deferred three.js module that main() finished
+  // wiring (camera exists, listeners bound). The module may also have
+  // loaded before this point — it re-checks the flag below.
+  window.__windsurfMainReady = true;
+  window.dispatchEvent(new Event('windsurf-main-ready'));
   requestAnimationFrame(tick);
 }
 
@@ -8097,6 +8255,448 @@ if (typeof document !== 'undefined' && document.getElementById('render-canvas'))
     console.error(e);
     showError(e.stack || e.message);
   });
+}
+</script>
+<!-- r58: three.js presentation layer (optional, loaded from CDN).
+     On success a transparent WebGL canvas is stacked over the volumetric
+     canvas and draws the test artifact as a lit PBR mesh with a soft
+     cyan edge glow, plus the streamline/pathline flow as GPU geometry
+     with real depth occlusion. The legacy canvas below keeps rendering
+     the ray-marched volume. When the module is unavailable (offline /
+     CDN failure) or the page is opened with ?three=0, the app runs the
+     exact legacy renderer. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+// ---------------------------------------------------------------------
+// r58 — three.js scene layer for the windsurf wind-tunnel simulator.
+//
+// Renders on its own transparent canvas stacked over the legacy
+// volumetric canvas (which continues to draw the ray-marched density /
+// smoke volume below). Draw order is painter-parity with the legacy
+// pipeline: volume (below) -> lit PBR artifact + edge glow -> streamline
+// trails -> pathline trails -> additive glow pathline heads. Unlike the
+// legacy line pass, the flow lines here are depth-tested against the
+// artifact, so lines that pass BEHIND the obstacle are correctly hidden.
+//
+// Physics stays untouched: the D3Q19 solver, tracer and pathline burst
+// all run in the main script exactly as before; this layer only
+// consumes their output (same builders: buildStreamlineLines, ...).
+// ---------------------------------------------------------------------
+
+// Reusable per-vertex (pos + color) geometry holder with preallocated
+// buffers so per-frame updates never allocate.
+function makeFlowGeometry() {
+  const geo = new THREE.BufferGeometry();
+  const emptyPos = new THREE.BufferAttribute(new Float32Array(0), 3);
+  const emptyCol = new THREE.BufferAttribute(new Float32Array(0), 3);
+  geo.setAttribute('position', emptyPos);
+  geo.setAttribute('color', emptyCol);
+  let posAttr = emptyPos, colAttr = emptyCol, cap = 0;
+  function fill(f32) {
+    const n = f32 ? f32.length / 6 : 0;
+    if (n === 0) { geo.setDrawRange(0, 0); return 0; }
+    if (n > cap) {
+      cap = Math.max(1024, Math.ceil(n * 1.25));
+      posAttr = new THREE.BufferAttribute(new Float32Array(cap * 3), 3);
+      colAttr = new THREE.BufferAttribute(new Float32Array(cap * 3), 3);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      colAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('position', posAttr);
+      geo.setAttribute('color', colAttr);
+    }
+    const pos = posAttr.array, col = colAttr.array;
+    for (let i = 0, j = 0; i < n; i++, j += 6) {
+      pos[i * 3] = f32[j]; pos[i * 3 + 1] = f32[j + 1]; pos[i * 3 + 2] = f32[j + 2];
+      col[i * 3] = f32[j + 3]; col[i * 3 + 1] = f32[j + 4]; col[i * 3 + 2] = f32[j + 5];
+    }
+    geo.setDrawRange(0, n);
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    return n;
+  }
+  return { geo, fill };
+}
+
+// Radial-gradient sprite for the pathline heads (glow dots).
+function makeGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.8)');
+  g.addColorStop(0.6, 'rgba(255,255,255,0.25)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Row-major 3x3 (legacy Mat3) -> THREE.Quaternion.
+function rowMajorRotation(rot) {
+  const m4 = new THREE.Matrix4();
+  const e = m4.elements;
+  e[0] = 1; e[5] = 1; e[10] = 1; e[15] = 1;
+  if (rot) {
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        e[c * 4 + r] = rot[r * 3 + c];
+      }
+    }
+  }
+  const q = new THREE.Quaternion();
+  q.setFromRotationMatrix(m4);
+  return q;
+}
+
+// Unit-space geometry per obstacle shape. Each shape is exactly the
+// solver SDF's local space (all extents +-1 before the transform's
+// per-axis scale / row-major rotation / position), so the visible mesh
+// and the voxelized solid ALWAYS agree (cylinder/cone conventions follow
+// the SDF, not the legacy mesh builders).
+function artifactGeometry(shape) {
+  let geo = null;
+  if (shape === 'box') {
+    geo = new THREE.BoxGeometry(2, 2, 2);
+  } else if (shape === 'sphere') {
+    geo = new THREE.SphereGeometry(1, 48, 32);
+  } else if (shape === 'cylinder') {
+    // SDF unit cylinder: axis along local Y, radius 1 in XZ.
+    geo = new THREE.CylinderGeometry(1, 1, 2, 48);
+  } else if (shape === 'cone') {
+    // SDF cone: apex at local +X, base disk (radius 1) at local -X.
+    geo = new THREE.ConeGeometry(1, 2, 48, 1, false);
+    geo.rotateZ(-Math.PI / 2);
+    geo.deleteAttribute('uv');
+  } else if (shape === 'wedge') {
+    geo = wedgeGeometry();
+  } else if (shape === 'tetrahedron') {
+    geo = tetraGeometry();
+  }
+  return geo;
+}
+
+// Flat helper: push one triangle, flipping the normal away from `ref`
+// (a point inside the shape) so winding is always outward.
+function pushTri(outPos, outNor, a, b, c, ref) {
+  const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+  const acx = c[0] - a[0], acy = c[1] - a[1], acz = c[2] - a[2];
+  let nx = aby * acz - abz * acy;
+  let ny = abz * acx - abx * acz;
+  let nz = abx * acy - aby * acx;
+  const len = Math.hypot(nx, ny, nz) || 1;
+  nx /= len; ny /= len; nz /= len;
+  const mx = (a[0] + b[0] + c[0]) / 3, my = (a[1] + b[1] + c[1]) / 3, mz = (a[2] + b[2] + c[2]) / 3;
+  if (nx * (mx - ref[0]) + ny * (my - ref[1]) + nz * (mz - ref[2]) < 0) {
+    nx = -nx; ny = -ny; nz = -nz;
+  }
+  for (const v of [a, b, c]) {
+    outPos.push(v[0], v[1], v[2]);
+    outNor.push(nx, ny, nz);
+  }
+}
+
+// Unit wedge: right-triangle cross-section in the XY plane — apex (1,0),
+// corners (-1,-1), (-1,1) — extruded over z in [-1, 1].
+function wedgeGeometry() {
+  const A1 = [1, 0, 1], B1 = [-1, -1, 1], C1 = [-1, 1, 1];
+  const A2 = [1, 0, -1], B2 = [-1, -1, -1], C2 = [-1, 1, -1];
+  const ref = [-1 / 3, 0, 0];
+  const pos = [], nor = [];
+  pushTri(pos, nor, A1, B1, C1, ref);
+  pushTri(pos, nor, A2, C2, B2, ref);
+  // side along edge A-B
+  pushTri(pos, nor, A1, B1, B2, ref); pushTri(pos, nor, A1, B2, A2, ref);
+  // side along edge A-C
+  pushTri(pos, nor, A1, C1, C2, ref); pushTri(pos, nor, A1, C2, A2, ref);
+  // back face at x = -1
+  pushTri(pos, nor, B1, C1, C2, ref); pushTri(pos, nor, B1, C2, B2, ref);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
+  return g;
+}
+
+// Unit tetrahedron (solver SDF vertices): (1,1,1), (1,-1,-1), (-1,1,-1),
+// (-1,-1,1) — the "even parity" cube corners.
+function tetraGeometry() {
+  const v = [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]];
+  const ref = [0, 0, 0];
+  const pos = [], nor = [];
+  pushTri(pos, nor, v[0], v[1], v[2], ref);
+  pushTri(pos, nor, v[0], v[2], v[3], ref);
+  pushTri(pos, nor, v[0], v[3], v[1], ref);
+  pushTri(pos, nor, v[1], v[3], v[2], ref);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
+  return g;
+}
+
+// Unit-space edge lines per shape (drawn as a cyan accent on the
+// artifact). Pairs of endpoints; the group transform scales/rotates them.
+function artifactEdges(shape) {
+  const pts = [];
+  const add = (a, b) => { pts.push(a[0], a[1], a[2], b[0], b[1], b[2]); };
+  if (shape === 'box') {
+    const c = [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1], [-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]];
+    const e = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    for (const [i, j] of e) add(c[i], c[j]);
+  } else if (shape === 'cylinder') {
+    ring(-1, pts); ring(1, pts);
+  } else if (shape === 'cone') {
+    for (let i = 0; i < 48; i++) {
+      const t0 = (i / 48) * 2 * Math.PI, t1 = ((i + 1) / 48) * 2 * Math.PI;
+      add([-1, Math.cos(t0), Math.sin(t0)], [-1, Math.cos(t1), Math.sin(t1)]);
+    }
+  } else if (shape === 'wedge') {
+    const A1 = [1, 0, 1], B1 = [-1, -1, 1], C1 = [-1, 1, 1];
+    const A2 = [1, 0, -1], B2 = [-1, -1, -1], C2 = [-1, 1, -1];
+    add(A1, B1); add(B1, C1); add(C1, A1);
+    add(A2, B2); add(B2, C2); add(C2, A2);
+    add(A1, A2); add(B1, B2); add(C1, C2);
+  } else if (shape === 'tetrahedron') {
+    const v = [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]];
+    for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) add(v[i], v[j]);
+  }
+  return pts.length ? new Float32Array(pts) : null;
+}
+function ring(y, pts) {
+  for (let i = 0; i < 48; i++) {
+    const t0 = (i / 48) * 2 * Math.PI, t1 = ((i + 1) / 48) * 2 * Math.PI;
+    pts.push(Math.cos(t0), y, Math.sin(t0), Math.cos(t1), y, Math.sin(t1));
+  }
+}
+
+function createThreeLayer(THREE, addons, opts) {
+  const canvas = opts.canvas;
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    alpha: true,
+    antialias: true,
+    preserveDrawingBuffer: true,
+    powerPreference: 'high-performance',
+  });
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
+  renderer.setClearColor(0x000000, 0);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 6000);
+  camera.position.set(22, 18, 22);
+
+  // PBR environment + studio rig (hemi + warm key + cool fill + rim).
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.add(new THREE.HemisphereLight(0x8fb6ff, 0x0b0e14, 0.8));
+  const key = new THREE.DirectionalLight(0xfff0d9, 2.6);
+  key.position.set(16, 22, 12);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0x9fc0ff, 0.9);
+  fill.position.set(-12, 6, -8);
+  scene.add(fill);
+  const rim = new THREE.DirectionalLight(0x63caff, 1.6);
+  rim.position.set(-16, 8, -18);
+  scene.add(rim);
+
+  // --- test artifact (lit PBR mesh + cyan edge accent) ---
+  let artifactGroup = null;
+  let artifactMesh = null;
+  let artifactMat = null;
+  function setObstacle(obs) {
+    if (artifactGroup) {
+      scene.remove(artifactGroup);
+      artifactGroup.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) o.material.dispose();
+      });
+      artifactGroup = null; artifactMesh = null; artifactMat = null;
+    }
+    if (!obs || !obs.transform) return;
+    const t = obs.transform;
+    const geo = artifactGeometry(obs.shape);
+    if (!geo) return;
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xbcc4cf,
+      metalness: 0.45,
+      roughness: 0.30,
+      envMapIntensity: 0.9,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 10;
+    const group = new THREE.Group();
+    group.add(mesh);
+    const edges = artifactEdges(obs.shape);
+    if (edges) {
+      const eg = new THREE.BufferGeometry();
+      eg.setAttribute('position', new THREE.BufferAttribute(edges, 3));
+      const el = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({
+        color: 0x7fd8ff,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        toneMapped: false,
+      }));
+      el.renderOrder = 11;
+      el.frustumCulled = false;
+      group.add(el);
+    }
+    group.position.set(t.position.x, t.position.y, t.position.z);
+    group.scale.set(t.scale.x, t.scale.y, t.scale.z);
+    group.quaternion.copy(rowMajorRotation(t.rotation));
+    scene.add(group);
+    artifactGroup = group;
+    artifactMesh = mesh;
+    artifactMat = mat;
+  }
+
+  // --- flow geometry (streamlines + pathline trails as colored line
+  // segments; pathline heads as additive glow points) ---
+  const streams = makeFlowGeometry();
+  const streamMat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const streamMesh = new THREE.LineSegments(streams.geo, streamMat);
+  streamMesh.renderOrder = 20;
+  streamMesh.frustumCulled = false;
+  scene.add(streamMesh);
+
+  const trails = makeFlowGeometry();
+  const trailMat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const trailMesh = new THREE.LineSegments(trails.geo, trailMat);
+  trailMesh.renderOrder = 21;
+  trailMesh.frustumCulled = false;
+  scene.add(trailMesh);
+
+  const headGeo = makeFlowGeometry();
+  const headMat = new THREE.PointsMaterial({
+    size: 13,
+    sizeAttenuation: false,
+    map: makeGlowTexture(),
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0.95,
+    toneMapped: false,
+  });
+  const headMesh = new THREE.Points(headGeo.geo, headMat);
+  headMesh.renderOrder = 22;
+  headMesh.frustumCulled = false;
+  scene.add(headMesh);
+
+  let streamsDone = false;
+  const stats = { frameCount: 0, triangles: 0, calls: 0, streamVerts: 0, headCount: 0 };
+
+  function frame(p) {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
+    camera.position.set(p.cameraPos[0], p.cameraPos[1], p.cameraPos[2]);
+    camera.lookAt(0, 0, 0);
+    if (artifactMat) {
+      const a = p.artifactAlpha == null ? 1 : Math.min(1, Math.max(0, p.artifactAlpha));
+      artifactMat.opacity = a;
+      artifactMat.transparent = a < 0.999;
+    }
+    const solver = p.backend && p.backend.solver;
+    const rebuild = p.playing || p.stepOnce || !streamsDone;
+    if (solver) {
+      if (rebuild) {
+        streams.fill(window.buildStreamlineLines(p.tracer, solver));
+        streamsDone = true;
+      }
+    } else {
+      streams.fill(null);
+      streamsDone = false;
+    }
+    const burst = p.pathlineBurst;
+    if (burst && p.pathlineEnabled) {
+      if (rebuild) {
+        trails.fill(window.buildPathlineTrails(burst));
+        headGeo.fill(window.buildPathlineHeads(burst));
+      }
+    } else {
+      trails.fill(null);
+      headGeo.fill(null);
+    }
+    renderer.render(scene, camera);
+    const info = renderer.info.render;
+    stats.frameCount++;
+    stats.triangles = info.triangles;
+    stats.calls = info.calls;
+    stats.streamVerts = streams.geo.attributes.position
+      ? streams.geo.attributes.position.count
+      : 0;
+    stats.headCount = headGeo.geo.attributes.position
+      ? headGeo.geo.attributes.position.count
+      : 0;
+  }
+
+  function resize(w, h) {
+    const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2);
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(Math.max(1, w), Math.max(1, h), false);
+    camera.aspect = Math.max(1, w) / Math.max(1, h);
+    camera.updateProjectionMatrix();
+  }
+
+  return {
+    canvas,
+    scene,
+    camera,
+    active: true,
+    stats,
+    get obstacleGroup() { return artifactGroup; },
+    setObstacle,
+    frame,
+    resize,
+    dispose() {
+      renderer.dispose();
+      pmrem.dispose();
+    },
+  };
+}
+window.__windsurfCreateThreeLayer = createThreeLayer;
+
+// --- boot: wait for main() to finish wiring, then hand THREE over. ---
+function tryInitThree() {
+  if (!window.__windsurfMainReady) return;
+  const init = window.__windsurfInitThree;
+  if (typeof init === 'function') {
+    try {
+      init(THREE, { RoomEnvironment });
+    } catch (err) {
+      console.warn('[windsurf:three] init failed — legacy renderer stays active.', err);
+    }
+  }
+}
+if (window.__windsurfMainReady) {
+  tryInitThree();
+} else {
+  window.addEventListener('windsurf-main-ready', tryInitThree, { once: true });
 }
 </script>
 </body>

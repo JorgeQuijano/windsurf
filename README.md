@@ -1,12 +1,32 @@
 # Windsurf
 
 Real-time 3D CFD wind-tunnel simulator that runs in your browser.
-Single HTML file, no build step, no dependencies.
+Single HTML file, no build step.
 
 👉 **<https://jorgequijano.github.io/windsurf/>**
 
 Powered by a D3Q19 Lattice Boltzmann solver with a WebGPU compute
 backend and a WebGL2 + CPU fallback. Hosted on GitHub Pages.
+
+## Rendering modes
+
+- **three.js scene (default)** — a transparent second WebGL canvas is
+  stacked over the volumetric canvas. The test artifact is drawn as a
+  lit PBR mesh (ACES filmic tone mapping, hemisphere + key/fill/rim
+  studio rig, environment reflections, cyan edge glow) and the flow
+  lines are GPU geometry that is depth-occluded by the artifact
+  (lines passing behind the obstacle are hidden correctly). The
+  ray-marched volume, smoke layer, slice plane, surface forces and
+  all physics run exactly as before on the canvas below. The three.js
+  module is loaded from a CDN; if it is unavailable (offline / CDN
+  failure) the app silently falls back to the legacy renderer.
+  Append `?three=0` to force the legacy renderer.
+- **Legacy renderer (`?three=0`)** — the original hand-rolled WebGL2
+  line + solid-cube pass over the volumetric canvas.
+
+Known three.js-mode limits (r58 prototype): ribbon mode renders as
+plain streamlines, and the WebGPU backend still shows no volumetric
+(its readback pipeline is broken upstream of this change).
 
 ## Features
 
