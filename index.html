@@ -889,7 +889,7 @@
       <div id="build-tag" style="padding:0 0 6px;font-family:ui-monospace,monospace">
         <details id="build-tag-details">
           <summary id="build-tag-chip" style="font-size:10px;color:var(--muted);cursor:pointer;list-style:none;display:inline-block;padding:2px 8px;border-radius:4px;background:var(--panel-2);border:1px solid var(--border)" title="Click to expand build info. Shift+D toggles.">dev</summary>
-          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r59: visual fluidity pass — damped orbit/zoom, animated presets, 60 fps default budget, time-scaled streamlines, wide anti-aliased LineSegments2 flow lines with tail fade, depth fog, contact shadow, and a physical clearcoat artifact. r58: optional three.js presentation layer (default; `?three=0` reverts to the legacy renderer) plus the mobile-first touch UI (full-screen canvas, thumb dock, bottom-sheet controls, pinch zoom). r57: in-app CPU/GPU compute toggle persisted to localStorage. Shift+D toggles this panel.</div>
+          <div id="build-tag-body" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">build r59: WebGPU load path repaired — bind-group layout now declares the pressure binding, the Params uniform is 56 bytes with a correct u32/f32 split, the WGSL smoke sampler is a legal module-level function, devices request 10 storage buffers, and density/velocity/vorticity/pressure/smoke arrive in one packed readback per frame. GPU drag and streamlines read the mirrors instead of replaying the solver. Visual fluidity: damped camera, animated presets, 60 fps default, time-scaled streamlines, wide anti-aliased flow lines with tail fade, fog, contact shadow. r58: three.js scene layer + mobile touch UI. Shift+D toggles this panel.</div>
         </details>
       </div>
       <div id="readout">
@@ -2489,16 +2489,48 @@ async function createComputeBackend(spec, forceCpu) {
     try {
       const adapter = await navigator.gpu.requestAdapter();
       if (adapter) {
-        const device = await adapter.requestDevice();
+        // r59 GPU fix: the LBM module binds 10 storage buffers, but the
+        // WebGPU default limit is 8. Request the higher limit explicitly
+        // (adapters that support it, including SwiftShader, report 10).
+        const maxStorage = adapter.limits && adapter.limits.maxStorageBuffersPerShaderStage;
+        if (!maxStorage || maxStorage < 10) {
+          const msg = 'WebGPU adapter supports only ' + (maxStorage || 0) +
+            ' storage buffers/stage; the LBM kernel needs 10';
+          console.warn('[windsurf] ' + msg);
+          window.__windsurfGpuError = msg;
+          return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false, reason: msg };
+        }
+        const device = await adapter.requestDevice({
+          requiredLimits: {
+            maxStorageBuffersPerShaderStage: 10,
+          },
+        });
+        // Surface validation/OOM errors instead of silently rendering
+        // a blank canvas. These are warnings only; the CPU fallback is
+        // still available by reloading with ?cpu=1.
+        if (device.addEventListener) {
+          device.addEventListener('uncapturederror', (ev) => {
+            console.warn('[windsurf] WebGPU uncaptured error:', ev.error && ev.error.message);
+            window.__windsurfGpuError = ev.error && ev.error.message;
+          });
+        }
+        if (device.lost && device.lost.then) {
+          device.lost.then((info) => {
+            console.warn('[windsurf] WebGPU device lost:', info.reason, info.message);
+            window.__windsurfGpuError = 'device lost: ' + info.reason + ' ' + (info.message || '');
+          });
+        }
         return { backend: new WebGPUCompute(device, spec), gpuRequested: true, gpuAvailable: true };
       }
       // r57: navigator.gpu exists but requestAdapter returned null —
       // typical in headless Chrome or browsers without WebGPU enabled.
       console.warn('[windsurf] WebGPU requestAdapter returned null — falling back to CPU.');
-      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false };
+      window.__windsurfGpuError = 'requestAdapter returned null';
+      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false, reason: 'no adapter' };
     } catch (e) {
       console.warn('[windsurf] WebGPU init failed, falling back to CPU:', e);
-      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false };
+      window.__windsurfGpuError = String(e && e.message || e);
+      return { backend: new CpuCompute(spec), gpuRequested: true, gpuAvailable: false, reason: String(e) };
     }
   }
   const reason = !navigator.gpu ? 'no navigator.gpu (Safari/Firefox/headless)'
@@ -2856,7 +2888,18 @@ fn macroscopic(@builtin(global_invocation_id) gid: vec3<u32>) {
   // cells have rho=0 (set earlier in the kernel), so p = -1/3
   // (purely cosmetic — the render path overwrites with 0 for
   // cells where solid[cell] = 1).
-  pressure_buf[cell] = select(0.0, (rho - 1.0) * 0.33333334, solid == 0u);
+  pressure_buf[cell] = select(0.0, (rho - 1.0) * 0.33333334, solid[cell] == 0u);
+}
+
+// r59 GPU fix: module-level helper. WGSL does not support nested
+// function declarations; the old sample-helper expression inside
+// scalarAdvect was a hard parse error, so the compute module never
+// compiled.
+fn sample_smoke(xx: u32, yy: u32, zz: u32) -> f32 {
+  if (xx >= params.nx || yy >= params.ny || zz >= params.nz) { return 0.0; }
+  let j = xx + yy * params.nx + zz * params.nx * params.ny;
+  if (solid[j] != 0u) { return 0.0; }
+  return smoke_buf_in[j];
 }
 
 // r38: passive scalar (smoke) advection kernel. One cell per
@@ -2901,15 +2944,6 @@ fn scalarAdvect(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ax = abs(ux); let ay = abs(uy); let az = abs(uz);
   let asum = ax + ay + az;
 
-  // Sample helper: out-of-bounds or solid -> 0.
-  let nx_i = params.nx; let ny_i = params.ny; let nz_i = params.nz;
-  let sample = fn(xx: u32, yy: u32, zz: u32) -> f32 {
-    if (xx >= nx_i || yy >= ny_i || zz >= nz_i) { return 0.0; }
-    let j = xx + yy * nx_i + zz * nx_i * ny_i;
-    if (solid[j] != 0u) { return 0.0; }
-    return smoke_buf_in[j];
-  };
-
   var s: f32;
   if (asum < 1e-9) {
     // No flow at this cell — keep the old smoke value (advection is
@@ -2920,7 +2954,7 @@ fn scalarAdvect(@builtin(global_invocation_id) gid: vec3<u32>) {
     // |u_axis| ≤ 1 per axis in the stable regime.
     let inv = 1.0 / asum;
     let wx = ax * inv; let wy = ay * inv; let wz = az * inv;
-    s = wx * sample(xu, y, z) + wy * sample(x, yu, z) + wz * sample(x, y, zu);
+    s = wx * sample_smoke(xu, y, z) + wy * sample_smoke(x, yu, z) + wz * sample_smoke(x, y, zu);
   }
   // Decay + clamp [0,1]. params.smoke_decay is set from the smoke
   // decay slider; clamping guards against slider values > 1.
@@ -2938,6 +2972,11 @@ class WebGPUCompute {
     this.solidCpu = new Uint8Array(this.n);
     this.densityCpu = new Float32Array(this.n);
     this.velMagCpu = new Float32Array(this.n);
+    // r59 GPU fix: full velocity mirror for drag computation. The old
+    // computeDragAsync replayed the whole simulation on the CPU every
+    // ~10 frames, which froze the page; drag can be computed directly
+    // from these mirrors instead.
+    this.uCpu = new Float32Array(this.n * 3);
     this.smokeCpu = new Float32Array(this.n);
     // r42: CPU-side mirror of the vorticity magnitude storage buffer.
     // Updated by readback() alongside density and velMag.
@@ -2968,6 +3007,11 @@ class WebGPUCompute {
         // separate kernel/dispatch needed. Read back to JS for the
         // renderer's volumetric ray-march colormap.
         { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        // r59 GPU fix: pressure buffer. The WGSL module and the bind
+        // group both declared binding 10, but this layout entry was
+        // missing, so every createBindGroup produced an invalid bind
+        // group and every submission was dropped.
+        { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       ],
     });
     const module = device.createShaderModule({ code: WGSL_LBM });
@@ -3017,8 +3061,9 @@ class WebGPUCompute {
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     // r38: per-cell velocity components for the scalar advection kernel.
+    // r59: COPY_SRC so the JS drag/streamline mirrors can read it back.
     this.uBuf = this.device.createBuffer({
-      size: n * 3 * 4, usage: GPUBufferUsage.STORAGE,
+      size: n * 3 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     // r38: ping-pong smoke buffers. Both are storage (write+read from
     // different bindings) and COPY_SRC (for the readback path).
@@ -3028,9 +3073,13 @@ class WebGPUCompute {
     this.smokeBufB = this.device.createBuffer({
       size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    // Params buffer grew from 32B to 48B (added smoke_decay f32).
+    // Params uniform. WGSL Params is 56 bytes: 3×u32 header (12 B)
+    // followed by 11×f32 fields (nx,ny,nz,cs2,inv_tau,u_inf,rho0,
+    // smoke_decay, osc_amp_x/y/z, osc_phase, osc_lambda_y/z). The old
+    // 48-byte allocation truncated the last two fields and failed
+    // uniform-buffer validation on real WebGPU devices.
     this.paramsBuf = this.device.createBuffer({
-      size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size: 56, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this._buildBindGroup();
   }
@@ -3133,15 +3182,30 @@ class WebGPUCompute {
     // r41: oscillating inflow (sinusoidal gust). Slots 8..13 are osc
     // amp_x/y/z, phase, lambda_y, lambda_z. At reset, osc_phase=0,
     // step_count starts at 0, so phase = 2π f · 0 = 0 → r38 behavior.
-    const paramsData = new Float32Array([
-      nx, ny, nz, 1 / 3,
-      1 / tau, u_inf, rho0, config.smokeDecay ?? 0.998,
-      config.oscAmpX ?? 0, config.oscAmpY ?? 0, config.oscAmpZ ?? 0,
-      0, // osc_phase = 0 at step 0
-      config.lambdaY ?? ny, config.lambdaZ ?? nz,
-    ]);
-    const paramsU32 = new Uint32Array(paramsData.buffer);
-    this.device.queue.writeBuffer(this.paramsBuf, 0, paramsU32);
+    // r59 GPU fix: Params mixes u32 (nx,ny,nz) and f32 fields. The old
+    // code built a Float32Array and reinterpreted the whole thing as
+    // Uint32Array, so WGSL read params.nx as the float bit pattern of
+    // 24.0 (1103101952) instead of 24. That made the kernels index
+    // outside the grid and produce mostly-zero fields. Pack the header
+    // and floats separately into one 56-byte buffer.
+    const paramsData = new ArrayBuffer(56);
+    const paramsU32 = new Uint32Array(paramsData);
+    const paramsF32 = new Float32Array(paramsData);
+    paramsU32[0] = nx;
+    paramsU32[1] = ny;
+    paramsU32[2] = nz;
+    paramsF32[3] = 1 / 3;
+    paramsF32[4] = 1 / tau;
+    paramsF32[5] = u_inf;
+    paramsF32[6] = rho0;
+    paramsF32[7] = config.smokeDecay ?? 0.998;
+    paramsF32[8] = config.oscAmpX ?? 0;
+    paramsF32[9] = config.oscAmpY ?? 0;
+    paramsF32[10] = config.oscAmpZ ?? 0;
+    paramsF32[11] = 0; // osc_phase = 0 at step 0
+    paramsF32[12] = config.lambdaY ?? ny;
+    paramsF32[13] = config.lambdaZ ?? nz;
+    this.device.queue.writeBuffer(this.paramsBuf, 0, paramsData);
     // r38: reset ping-pong orientation to the initial state.
     this._smokePing = 0;
     this._buildBindGroup();
@@ -3232,98 +3296,91 @@ class WebGPUCompute {
   // updated by readbackSmoke(); if it has never been read, this returns
   // a zero-filled array so the renderer doesn't render garbage.
   get smokeArray() {
-    if (this._smokeReadback) {
-      // Readback in flight — return a zero array to avoid a race
-      // condition where we'd otherwise expose a half-updated buffer.
-      // The next frame's readback will land and the renderer will pick
-      // it up.
-      return new Float32Array(this.n);
-    }
+    // r59 GPU fix: always return the last completed mirror. Returning
+    // a fresh zero array while a readback was in flight made the smoke
+    // texture flicker to empty every other frame.
     return this.smokeCpu;
   }
 
-  // r38: read the latest smoke buffer to CPU. Called from render loop
-  // (async) to keep the JS-side `smokeCpu` mirror up to date.
+  // r38: kept for API compatibility. Smoke is now included in the
+  // combined readback() staging copy, so this simply refreshes all
+  // mirrors in one round-trip.
   async readbackSmoke() {
-    const inFlight = this._smokeReadback;
-    if (inFlight) await inFlight;
-    const buf = this.smoke;
-    const tmp = this.device.createBuffer({
-      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const cmd = this.device.createCommandEncoder();
-    cmd.copyBufferToBuffer(buf, 0, tmp, 0, this.n * 4);
-    this.device.queue.submit([cmd.finish()]);
-    const promise = tmp.mapAsync(GPUMapMode.READ).then(() => {
-      this.smokeCpu.set(new Float32Array(tmp.getMappedRange().slice(0)));
-      tmp.unmap();
-      tmp.destroy();
-    }).catch((e) => {
-      tmp.destroy();
-      throw e;
-    });
-    this._smokeReadback = promise;
-    await promise;
-    this._smokeReadback = null;
+    return this.readback();
   }
 
   async readback() {
-    // Read density and velMag back to CPU. We use a temp buffer for the
-    // mapping since GPUQueue.copyBufferToBuffer + mapAsync is the supported path.
+    // r59 GPU fix: one staging buffer, one mapAsync, one submission for
+    // density + velocity magnitude + vorticity + pressure + full velocity
+    // + smoke. The old path did five sequential mapAsync round-trips per
+    // frame, which stalled the GPU pipeline and made GPU mode feel worse
+    // than CPU.
+    const n = this.n;
+    const totalFloats = n * 8;
     const tmp = this.device.createBuffer({
-      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      size: totalFloats * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const cmd = this.device.createCommandEncoder();
-    cmd.copyBufferToBuffer(this.densityBuf, 0, tmp, 0, this.n * 4);
+    const floatBytes = n * 4;
+    cmd.copyBufferToBuffer(this.densityBuf, 0, tmp, 0, floatBytes);
+    cmd.copyBufferToBuffer(this.velMagBuf, 0, tmp, floatBytes, floatBytes);
+    cmd.copyBufferToBuffer(this.vortMagBuf, 0, tmp, floatBytes * 2, floatBytes);
+    cmd.copyBufferToBuffer(this.pressureBuf, 0, tmp, floatBytes * 3, floatBytes);
+    cmd.copyBufferToBuffer(this.uBuf, 0, tmp, floatBytes * 4, floatBytes * 3);
+    cmd.copyBufferToBuffer(this.smoke, 0, tmp, floatBytes * 7, floatBytes);
     this.device.queue.submit([cmd.finish()]);
     await tmp.mapAsync(GPUMapMode.READ);
-    this.densityCpu.set(new Float32Array(tmp.getMappedRange().slice(0)));
+    const data = new Float32Array(tmp.getMappedRange().slice(0));
+    this.densityCpu.set(data.subarray(0, n));
+    this.velMagCpu.set(data.subarray(n, n * 2));
+    this.vortMagCpu.set(data.subarray(n * 2, n * 3));
+    this.pressureCpu.set(data.subarray(n * 3, n * 4));
+    this.uCpu.set(data.subarray(n * 4, n * 7));
+    this.smokeCpu.set(data.subarray(n * 7, n * 8));
     tmp.unmap();
     tmp.destroy();
-    const tmp2 = this.device.createBuffer({
-      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const cmd2 = this.device.createCommandEncoder();
-    cmd2.copyBufferToBuffer(this.velMagBuf, 0, tmp2, 0, this.n * 4);
-    this.device.queue.submit([cmd2.finish()]);
-    await tmp2.mapAsync(GPUMapMode.READ);
-    this.velMagCpu.set(new Float32Array(tmp2.getMappedRange().slice(0)));
-    tmp2.unmap();
-    tmp2.destroy();
-    // r42: readback the vorticity magnitude buffer.
-    const tmp3 = this.device.createBuffer({
-      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const cmd3 = this.device.createCommandEncoder();
-    cmd3.copyBufferToBuffer(this.vortMagBuf, 0, tmp3, 0, this.n * 4);
-    this.device.queue.submit([cmd3.finish()]);
-    await tmp3.mapAsync(GPUMapMode.READ);
-    this.vortMagCpu.set(new Float32Array(tmp3.getMappedRange().slice(0)));
-    tmp3.unmap();
-    tmp3.destroy();
-    // r43: readback pressure storage buffer.
-    const tmp4 = this.device.createBuffer({
-      size: this.n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const cmd4 = this.device.createCommandEncoder();
-    cmd4.copyBufferToBuffer(this.pressureBuf, 0, tmp4, 0, this.n * 4);
-    this.device.queue.submit([cmd4.finish()]);
-    await tmp4.mapAsync(GPUMapMode.READ);
-    this.pressureCpu.set(new Float32Array(tmp4.getMappedRange().slice(0)));
-    tmp4.unmap();
-    tmp4.destroy();
   }
 
-  // Drag: copy f+u to CPU then run JS drag. Heavyweight; we run async every
-  // ~30 frames rather than every frame.
-  async computeDragAsync(idx) {
-    // Read rho back (already cached) — but we also need u. For simplicity we
-    // just rebuild on CPU via a fresh LbmSolver with the same config. The
-    // WebGPU stepCount is in sync if user doesn't reset mid-step.
-    const cpu = new LbmSolver(this.config);
-    // Sync step count
-    for (let i = 0; i < this.stepCount; i++) cpu.step();
-    return computeDrag(cpu, idx);
+  // r59 GPU fix: drag from the latest GPU readback mirrors instead of
+  // rebuilding an LbmSolver and replaying every step on the CPU (that
+  // old path ran synchronously every 10 frames and could stall the page
+  // for seconds once stepCount climbed).
+  computeDrag(idx, opts = {}) {
+    if (!this.config) return null;
+    const nx = this.spec.nx, ny = this.spec.ny;
+    const grid = {
+      rho: this.densityCpu,
+      u: this.uCpu,
+      cs2: 1 / 3,
+      lin: (x, y, z) => x + y * nx + z * nx * ny,
+    };
+    return computeDrag({ config: this.config, solid: this.solidCpu, grid }, idx, opts);
+  }
+
+  // Drag: kept for API compatibility. Now cheap — reads the mirrors.
+  async computeDragAsync(idx, opts = {}) {
+    return this.computeDrag(idx, opts);
+  }
+
+  // r59 GPU fix: adapter that lets the visual tracer/pathline code sample
+  // the latest readback velocity field exactly like the CPU solver. The
+  // GPU backend has no LbmSolver instance, so without this the streamlines
+  // stayed empty in GPU mode.
+  get velocityField() {
+    if (!this._velocityField) {
+      const nx = this.spec.nx, ny = this.spec.ny;
+      this._velocityField = {
+        config: this.config,
+        solid: this.solidCpu,
+        grid: {
+          u: this.uCpu,
+          lin: (x, y, z) => x + y * nx + z * nx * ny,
+        },
+      };
+    }
+    this._velocityField.config = this.config;
+    return this._velocityField;
   }
 
   // Compatibility shim: the renderer reads these synchronously.
@@ -6634,7 +6691,7 @@ function registerTests(tr) {
       'camera damping must run in the render loop');
     tr.assert(src.includes('const frameDtScale = Math.min(2.5, Math.max(0.5, dt / (1000 / 60)))'),
       'tracer time scaling missing');
-    tr.assert(src.includes('tracer.step(backend.solver, 3.0 * frameDtScale)'),
+    tr.assert(src.includes('tracer.step(flowField, 3.0 * frameDtScale)'),
       'streamlines must advance by elapsed time, not frame count');
     tr.assert(src.includes('function makeWideFlow('),
       'wide-line buffer helper missing');
@@ -6646,6 +6703,56 @@ function registerTests(tr) {
       'depth fog missing');
     tr.assert(src.includes('const defaultHz = 60;'),
       '60 fps must be the default render budget');
+  });
+
+  // -- r59: WebGPU load-path regressions --
+  // The GPU path previously failed at four independent validation points.
+  // These source guards keep the fixes from silently regressing.
+  tr.test('r59_gpu_bind_group_and_params_layout', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.includes("{ binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }"),
+      'bind-group layout must declare binding 10 (pressure)');
+    tr.assert(src.includes('size: 56, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST'),
+      'params uniform buffer must be 56 bytes');
+    tr.assert(src.includes('paramsU32[0] = nx;'),
+      'params header must be written as u32, not float bit patterns');
+    const badParamsCast = 'new Uint32Array(' + 'paramsData.buffer)';
+    tr.assert(!src.includes(badParamsCast),
+      'params must not reinterpret a Float32Array as u32');
+  });
+
+  tr.test('r59_gpu_shader_and_limits', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.includes("requiredLimits: {\n            maxStorageBuffersPerShaderStage: 10,"),
+      'device must request 10 storage buffers per stage');
+    tr.assert(src.includes('fn sample_smoke('),
+      'WGSL smoke sampler must be a module-level function');
+    const badNested = 'let sample = ' + 'fn(';
+    tr.assert(!src.includes(badNested),
+      'nested WGSL function declarations are a parse error');
+    tr.assert(src.includes('solid[cell] == 0u'),
+      'WGSL pressure write must index the solid mask');
+  });
+
+  tr.test('r59_gpu_readback_and_velocity_field', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.includes('const totalFloats = n * 8;'),
+      'GPU readback must use one packed staging buffer');
+    tr.assert(src.includes('get velocityField()'),
+      'WebGPU backend must expose a tracer velocity field');
+    tr.assert(src.includes('backend.solver || backend.velocityField'),
+      'render/physics must use the GPU velocity-field adapter');
+    tr.assert(src.includes('computeDrag({ config: this.config, solid: this.solidCpu, grid }'),
+      'GPU drag must read the mirrors, not replay the solver');
+    const badReplay = 'for (let i = 0; i < this.stepCount; ' + 'i++) cpu.step();';
+    tr.assert(!src.includes(badReplay),
+      'GPU drag must not replay every LBM step on the CPU');
   });
 }
 
@@ -9006,6 +9113,10 @@ async function main() {
     // r59: damped orbit/zoom runs on every rendered frame, independent
     // of the physics state, so navigating stays smooth even while paused.
     camera.step(Math.min(0.05, dt / 1000));
+    // CPU backend exposes a live LbmSolver; the WebGPU backend exposes
+    // a readback mirror with the same {config, solid, grid} shape so the
+    // streamline/pathline tracer can run in GPU mode too.
+    const flowField = backend.solver || backend.velocityField || null;
 
     if (playing || stepOnce) {
       const steps = playing ? simStepsPerFrame : 1;
@@ -9013,14 +9124,14 @@ async function main() {
       // Advect the streamline tracer through the same velocity field.
       // dt=3.0 makes each tracer step large enough that 48-point trails
       // span many cells of the tunnel — visible curves, not dots.
-      if (backend.solver) tracer.step(backend.solver, 3.0 * frameDtScale);
+      if (flowField) tracer.step(flowField, 3.0 * frameDtScale);
       // r46: advect the pathline burst through the same velocity field.
       // Uses the same dt=3.0 as the streamline tracer so the burst
       // matches the visible flow speed. Only steps when pathlineEnabled
       // is true; otherwise the burst is frozen (but preserved so the
       // user can toggle on/off without losing state).
-      if (backend.solver && pathlineEnabled && pathlineBurst) {
-        pathlineBurst.step(backend.solver, 3.0 * frameDtScale);
+      if (flowField && pathlineEnabled && pathlineBurst) {
+        pathlineBurst.step(flowField, 3.0 * frameDtScale);
       }
       simStepsThisSecond += steps;
       stepOnce = false;
@@ -9048,7 +9159,7 @@ async function main() {
           // recordCdSample() would otherwise alias them).
           recordCdStrip(dragReport.cd);
         }
-        if (backend.computeDragAsync) {
+        if (!backend.computeDrag && backend.computeDragAsync) {
           backend.computeDragAsync(0).then(r => {
             updateDragUI(r);
             // Async path also feeds the plot.
@@ -9101,8 +9212,39 @@ async function main() {
         if (fieldMode === 3) return backend.pressure;
         return backend.density;
       })();
-      // CPU path: synchronous density. WebGPU: readback once in a while.
-      if (volumeData) {
+      // CPU path: synchronous density. WebGPU: upload the latest CPU
+      // mirror and keep an async readback in flight.
+      const gpuReadback = !!(backend.readback && visible);
+      if (gpuReadback) {
+        if (volumeData) renderer.uploadVolume(volumeData);
+        // r59 GPU fix: the old branch only called backend.readback()
+        // when volumeData was falsy. For WebGPU densityCpu is always a
+        // truthy Float32Array (initially all zero), so readback never
+        // ran: the volume stayed blank and drag/streamlines had no data.
+        if (!backend._readbackBusy) {
+          backend._readbackBusy = true;
+          backend.readback()
+            .then(() => {
+              // Refresh the one-shot diagnostic with real GPU data.
+              if (densityStatsEl && (!window.__densityStats || window.__densityStats.mx === 0)) {
+                const d = backend.densityCpu;
+                let mn = Infinity, mx = -Infinity, sum = 0, nz = 0;
+                for (let i = 0; i < d.length; i++) {
+                  const v = d[i];
+                  if (v < mn) mn = v;
+                  if (v > mx) mx = v;
+                  if (v > 0.01) nz++;
+                  sum += v;
+                }
+                window.__densityStats = { mn, mx, mean: sum / d.length, nonzero: nz, total: d.length };
+                console.log('[windsurf] GPU density stats', window.__densityStats);
+                densityStatsEl.textContent = `min=${mn.toFixed(2)} max=${mx.toFixed(2)} nonzero=${(nz / d.length * 100).toFixed(0)}%`;
+              }
+            })
+            .catch((err) => console.warn('[windsurf] GPU readback failed:', err))
+            .finally(() => { backend._readbackBusy = false; });
+        }
+      } else if (volumeData) {
         renderer.uploadVolume(volumeData);
         // Diagnostic: track density range so we can see if data is flowing.
         if (window.__densityStats !== false) {
@@ -9121,17 +9263,6 @@ async function main() {
             densityStatsEl.textContent = `min=${mn.toFixed(2)} max=${mx.toFixed(2)} nonzero=${(nz/d.length*100).toFixed(0)}%`;
           }
         }
-      // r54: skip GPU readbacks when tab is hidden — there's nothing
-      // on the screen for them to feed. Physics still runs above so
-      // the wake stays coherent for when the user returns.
-      } else if (backend.readback && visible) {
-        backend.readback().then(() => {
-          const fMode = fieldMode; // capture current value at callback time
-          let data = backend.densityCpu;
-          if (fMode === 1) data = backend.velMagCpu;
-          else if (fMode === 2) data = backend.vortMagCpu;
-          if (data) renderer.uploadVolume(data);
-        });
       }
       // r38: smoke upload. CPU path: synchronous via `backend.smoke`
       // (a Float32Array view of the solver's grid.smoke — no copy, no
@@ -9149,13 +9280,8 @@ async function main() {
         // frame, no readback on WebGPU. Fine.
         renderer.uploadSmoke(smokeData);
       }
-      // r38: WebGPU readback — kick off async readback of the smoke
-      // buffer every frame. Cheap (~16KB), in parallel with the
-      // density readback. _smokeReadback guards against overlap.
-      // r54: skip smoke readbacks when the tab is hidden.
-      if (backend.readbackSmoke && smokeEnabled && visible) {
-        backend.readbackSmoke().catch(() => { /* swallow — readback errors are non-fatal */ });
-      }
+      // r59: smoke is included in the combined GPU readback above, so
+      // there is no separate readbackSmoke() round-trip any more.
       const aspect = canvas.clientWidth / canvas.clientHeight;
       const vp = camera.viewProj(aspect);
       // r55: cache vp + canvas dims so the surface overlay can read
@@ -9240,7 +9366,7 @@ async function main() {
       if (lines) {
         // Update streamlines every frame (they move). The streamlines are
         // the only segment after the wall/marker removal.
-        if (backend.solver) {
+        if (flowField) {
           if (ribbonEnabled) {
             // r45: build the trail as a triangle-strip ribbon
             // billboarded to the camera. Pass the camera position so
@@ -9249,14 +9375,14 @@ async function main() {
             // optional drawMode so this swaps the topology without
             // touching the attribute layout.
             const streamGeom = buildStreamlineRibbons(
-              tracer, backend.solver, vp.cameraPos, ribbonWidth
+              tracer, flowField, vp.cameraPos, ribbonWidth
             );
             // r45: gl.TRIANGLE_STRIP is 0x0005 in WebGL2. Pull it
             // from the line renderer's gl context (window.__windsurfLines
             // is set by applyConfig).
             lines.updateSegment(0, streamGeom, window.__windsurfLines.gl.TRIANGLE_STRIP);
           } else {
-            const streamGeom = buildStreamlineLines(tracer, backend.solver);
+            const streamGeom = buildStreamlineLines(tracer, flowField);
             lines.updateSegment(0, streamGeom);
           }
           // r46: update the pathline trail and head segments. The
@@ -9908,7 +10034,7 @@ function createThreeLayer(THREE, addons, opts) {
     } else {
       shadowPlane.visible = false;
     }
-    const solver = p.backend && p.backend.solver;
+    const solver = p.backend && (p.backend.solver || p.backend.velocityField);
     const rebuild = p.playing || p.stepOnce || !streamsDone;
     if (solver) {
       if (rebuild) {

@@ -24,9 +24,10 @@ backend and a WebGL2 + CPU fallback. Hosted on GitHub Pages.
 - **Legacy renderer (`?three=0`)** — the original hand-rolled WebGL2
   line + solid-cube pass over the volumetric canvas.
 
-Known three.js-mode limits (r58 prototype): ribbon mode renders as
-plain streamlines, and the WebGPU backend still shows no volumetric
-(its readback pipeline is broken upstream of this change).
+Known three.js-mode limit: ribbon mode renders as plain streamlines
+in the three.js overlay (`?three=0` still supports ribbons in the
+legacy renderer). WebGPU compute now initializes and renders correctly;
+the volume is fed by a single packed readback per frame.
 
 Works on desktop and mobile: phones get a full-screen canvas, a
 thumb-friendly control dock, and a swipe-away bottom sheet, while the
@@ -35,6 +36,7 @@ simulation automatically switches to a lighter lattice and render budget.
 ## Features
 
 - **LatticeBoltzmannSolver** — D3Q19, bounce-back walls, Smagorinsky LES
+- **WebGPUCompute** — GPU collision/streaming/macroscopic/scalar kernels, packed readback, and mirror-based drag/streamline sampling
 - **SixShapeObstacles** — Cube, Sphere, Cylinder, Wedge, Cone, Tetrahedron
 - **LiveDragReadout** — Pressure + viscous breakdown, real-time Cd display
 - **CdOverTimeStrip** — Rolling 10-second Cd waveform (Karman shedding visible)
@@ -49,7 +51,7 @@ simulation automatically switches to a lighter lattice and render budget.
 - **ThreeJsSceneLayer** — optional lit PBR artifact and depth-occluded flow lines on a transparent overlay (`?three=0` disables)
 - **SmoothCamera** — damped orbit/zoom with animated preset transitions
 - **WideFlowLines** — anti-aliased screen-space flow ribbons with fading motion trails
-- **SelfTestHarness** — 114 in-browser assertions covering the solver, geometry, and UI
+- **SelfTestHarness** — 117 in-browser assertions covering the solver, geometry, and UI
 - **MobileTouchUI** — full-screen canvas, glass HUD, bottom-sheet controls, and a 5-button thumb dock
 - **TouchCamera** — one-finger orbit, two-finger pinch dolly, tap-to-open help tooltips
 - **AdaptiveQuality** — phones run a 24×16×16 lattice, 64-step ray-march, 64 streamlines, and a 60 fps default budget
@@ -119,7 +121,7 @@ The iteration loop is sub-second on any commit.
 
 ## Validation
 
-One hundred and fourteen in-browser assertions cover the solver, geometry, and UI:
+One hundred and seventeen in-browser assertions cover the solver, geometry, and UI:
 
 - **LbmInvariants** — D3Q19 weights, lattice indexing, equilibrium function
 - **EquilibriumDistribution** — Steady state at t=0
@@ -144,6 +146,8 @@ One hundred and fourteen in-browser assertions cover the solver, geometry, and U
 - **MeshLayouts** — The artifact mesh survives a real rotation matrix, the cube call site passes `t.rotation`, and every non-cube shape uses the 7-float pos/normal/faceId layout
 - **CameraDamping** — Orbit/zoom eases toward its target instead of snapping, and preset snaps stay deterministic
 - **VisualFluidity** — Wide anti-aliased flow lines, time-scaled tracer motion, depth fog, and the 60 fps default budget
+- **WebGpuLayout** — Bind-group binding 10, 56-byte u32/f32 Params layout, and the module-level WGSL smoke sampler
+- **WebGpuDataPath** — Packed readback, velocity-field adapter for streamlines, mirror-based drag, and 10-buffer device limits
 
 Run in Node (no browser needed):
 
@@ -221,6 +225,9 @@ A `pages` job deploys `index.html` to GitHub Pages.
   (screen-space width, anti-aliased) instead of 1-pixel GL lines.
 - **TimeScaledTracers** — streamline/pathline advection scales with
   elapsed frame time, so visuals keep the same speed at 30, 60, or 120 Hz.
+- **GpuMirrors** — the WebGPU backend shares the same drag/tracer
+  interfaces as the CPU solver by exposing readback mirrors as a
+  `velocityField` adapter, avoiding any CPU solver replay.
 
 ## License
 
