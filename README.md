@@ -47,10 +47,12 @@ simulation automatically switches to a lighter lattice and render budget.
 - **OscillatingInflow** — Sinusoidal gust in 3 axes for Karman vortex streets
 - **CameraPresets** — TopDown, SideOn, Iso, WakeView
 - **ThreeJsSceneLayer** — optional lit PBR artifact and depth-occluded flow lines on a transparent overlay (`?three=0` disables)
-- **SelfTestHarness** — 112 in-browser assertions covering the solver, geometry, and UI
+- **SmoothCamera** — damped orbit/zoom with animated preset transitions
+- **WideFlowLines** — anti-aliased screen-space flow ribbons with fading motion trails
+- **SelfTestHarness** — 114 in-browser assertions covering the solver, geometry, and UI
 - **MobileTouchUI** — full-screen canvas, glass HUD, bottom-sheet controls, and a 5-button thumb dock
 - **TouchCamera** — one-finger orbit, two-finger pinch dolly, tap-to-open help tooltips
-- **AdaptiveQuality** — phones run a 24×16×16 lattice, 64-step ray-march, 48 streamlines, and a 30 fps default budget
+- **AdaptiveQuality** — phones run a 24×16×16 lattice, 64-step ray-march, 64 streamlines, and a 60 fps default budget
 
 ## Live Demo
 
@@ -95,7 +97,7 @@ The bottom sheet groups controls into **Sim**, **Visual**, **Scene**, and
 |---|---|---|
 | WebGPU compute | 30–60 fps | Chrome / Edge on a recent GPU |
 | WebGL2 + CPU (desktop) | 2–5 fps | Safari, Firefox |
-| WebGL2 + CPU (mobile profile) | 15–30 fps | 24×16×16 lattice, 64-step ray-march |
+| WebGL2 + CPU (mobile profile) | 15–60 fps | 24×16×16 lattice, 64-step ray-march, 60 fps target |
 | CPU JS only | 1–3 fps | Headless / low-power devices |
 
 Phones automatically select the mobile profile. If the frame rate is
@@ -117,7 +119,7 @@ The iteration loop is sub-second on any commit.
 
 ## Validation
 
-One hundred and twelve in-browser assertions cover the solver, geometry, and UI:
+One hundred and fourteen in-browser assertions cover the solver, geometry, and UI:
 
 - **LbmInvariants** — D3Q19 weights, lattice indexing, equilibrium function
 - **EquilibriumDistribution** — Steady state at t=0
@@ -140,6 +142,8 @@ One hundred and twelve in-browser assertions cover the solver, geometry, and UI:
 - **MobileGestures** — Pointer camera, pinch dolly, adaptive lattice/raymarch budget, visual-viewport resize handling
 - **MobileWiring** — Dock play/step/reset/controls actions share state with the desktop buttons
 - **MeshLayouts** — The artifact mesh survives a real rotation matrix, the cube call site passes `t.rotation`, and every non-cube shape uses the 7-float pos/normal/faceId layout
+- **CameraDamping** — Orbit/zoom eases toward its target instead of snapping, and preset snaps stay deterministic
+- **VisualFluidity** — Wide anti-aliased flow lines, time-scaled tracer motion, depth fog, and the 60 fps default budget
 
 Run in Node (no browser needed):
 
@@ -210,6 +214,13 @@ A `pages` job deploys `index.html` to GitHub Pages.
 - **SafeAreaAware** — the HUD, dock, sheet, and tooltips respect
   `env(safe-area-inset-*)` so notches and home indicators don't cover
   controls.
+- **DampedCamera** — drag/pinch writes to a target pose; the rendered
+  pose eases toward it with frame-rate-independent exponential damping.
+  Presets glide instead of cutting.
+- **WideFlowLines** — flow geometry uses `LineSegments2` / `LineMaterial`
+  (screen-space width, anti-aliased) instead of 1-pixel GL lines.
+- **TimeScaledTracers** — streamline/pathline advection scales with
+  elapsed frame time, so visuals keep the same speed at 30, 60, or 120 Hz.
 
 ## License
 
