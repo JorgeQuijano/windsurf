@@ -2,7 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <!-- r58: mobile / home-screen chrome. The app still ships as one HTML
+       file; these tags let phones treat it like a standalone app when
+       added to the home screen (iOS uses the apple-* variants). -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Windsurf">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%230b0d12'/%3E%3Cpath%20d='M10%2020h26c5%200%208-3%208-7'%20fill='none'%20stroke='%236fd0ff'%20stroke-width='4'%20stroke-linecap='round'/%3E%3Cpath%20d='M8%2032h34c6%200%2010%204%2010%2010s-4%2010-10%2010'%20fill='none'%20stroke='%233c7dff'%20stroke-width='4'%20stroke-linecap='round'/%3E%3C/svg%3E">
   <title>windsurf-js — 3D wind tunnel in your browser</title>
   <style>
     :root {
@@ -16,6 +26,7 @@
       --good: #6fe3a4;
       --bad: #ff7a7a;
       --warn: #ffce6a;
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -39,6 +50,7 @@
       grid-template-columns: 1fr 280px;
       height: 100vh;
       width: 100vw;
+      position: relative;
     }
     #render-canvas {
       width: 100%;
@@ -250,6 +262,7 @@
       width: 100%;
       accent-color: var(--accent);
     }
+    input[type="checkbox"] { accent-color: var(--accent); }
     .buttons {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -337,6 +350,502 @@
       white-space: pre-wrap;
       color: var(--bad);
     }
+
+    /* =================================================================
+       r58 — Mobile / touch layout
+       -----------------------------------------------------------------
+       On phones the 280px side panel used to squeeze the render canvas
+       down to ~110px. Phones now get a full-screen canvas with:
+         · a compact glass top HUD (live fps + drag readout)
+         · a 5-button thumb dock (play / step / reset / views / controls)
+         · the control panel as a swipe-away bottom sheet with 4 tabs
+         · one-finger orbit + two-finger pinch zoom on the canvas
+       Everything below is scoped to narrow viewports, so the desktop
+       two-column layout is byte-for-byte unchanged.
+       ================================================================= */
+    #mobile-topbar,
+    #mobile-hint,
+    #mobile-dock,
+    #mobile-view-menu,
+    #sheet-backdrop,
+    #panel-mobile-head,
+    #mobile-tabs { display: none; }
+
+    @media (max-width: 900px) {
+      html, body {
+        height: 100%;
+        overscroll-behavior: none;
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        overflow: hidden;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #app {
+        display: block;
+        height: 100vh;
+        height: 100dvh;
+        min-height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+      }
+      #render-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+      }
+      #render-canvas:active { cursor: default; }
+
+      /* r59: the optional three.js canvas sits above the volumetric
+         canvas. On desktop the grid cell handles the overlap; on phones
+         #app is display:block, so pin the overlay to the viewport and
+         give it the same touch gesture rules as the render canvas. */
+      #three-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+      }
+
+      /* Slice-plane overlay: move it under the top HUD and shrink it so
+         it doesn't cover the tunnel on a narrow screen. */
+      #slice-canvas {
+        left: auto !important;
+        top: calc(74px + env(safe-area-inset-top, 0px)) !important;
+        right: 12px !important;
+        width: min(38vw, 190px) !important;
+        height: min(38vw, 190px) !important;
+        border-radius: 10px !important;
+      }
+
+      /* ---------------- top HUD ---------------- */
+      #mobile-topbar {
+        display: flex;
+        position: fixed;
+        z-index: 20;
+        top: calc(10px + env(safe-area-inset-top, 0px));
+        left: calc(10px + env(safe-area-inset-left, 0px));
+        right: calc(10px + env(safe-area-inset-right, 0px));
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        pointer-events: none;
+      }
+      .m-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px 7px 8px;
+        border-radius: 13px;
+        background: rgba(14, 17, 24, 0.78);
+        border: 1px solid rgba(111, 208, 255, 0.18);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        -webkit-backdrop-filter: blur(12px);
+        backdrop-filter: blur(12px);
+      }
+      .m-logo {
+        width: 27px;
+        height: 27px;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, #6fd0ff, #3c7dff);
+        color: #071018;
+        font-weight: 800;
+        font-size: 14px;
+        letter-spacing: -0.5px;
+      }
+      .m-brand strong {
+        display: block;
+        font-size: 13px;
+        line-height: 1.05;
+        letter-spacing: 0.3px;
+      }
+      .m-brand small {
+        display: block;
+        color: var(--muted);
+        font-size: 9px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        letter-spacing: 0.3px;
+      }
+      .m-stats {
+        display: flex;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 13px;
+        background: rgba(14, 17, 24, 0.78);
+        border: 1px solid var(--border);
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+        pointer-events: auto;
+        -webkit-backdrop-filter: blur(12px);
+        backdrop-filter: blur(12px);
+        transition: transform 0.1s ease, border-color 0.15s ease;
+      }
+      .m-stats:active {
+        transform: scale(0.96);
+        border-color: var(--accent);
+      }
+      .m-stats:focus { outline: none; }
+      .m-stats:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .m-stats span {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 1px;
+        font-size: 9px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .m-stats b {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 13px;
+        line-height: 1;
+        color: var(--text);
+        min-width: 24px;
+        text-align: right;
+      }
+      .m-stats span:last-child b { min-width: 38px; }
+      .m-stats span + span {
+        border-left: 1px solid var(--border);
+        padding-left: 8px;
+      }
+
+      /* ---------------- first-run gesture hint ---------------- */
+      #mobile-hint {
+        display: flex;
+        position: fixed;
+        z-index: 15;
+        left: 50%;
+        bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+        transform: translateX(-50%);
+        gap: 12px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: rgba(14, 17, 24, 0.82);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+        -webkit-backdrop-filter: blur(10px);
+        backdrop-filter: blur(10px);
+        pointer-events: none;
+        transition: opacity 0.4s ease, transform 0.4s ease;
+      }
+      #mobile-hint b { color: var(--text); font-weight: 600; }
+      #mobile-hint.hidden {
+        opacity: 0;
+        transform: translate(-50%, 6px);
+      }
+
+      /* ---------------- bottom thumb dock ---------------- */
+      #mobile-dock {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        position: fixed;
+        z-index: 25;
+        left: 50%;
+        right: auto;
+        width: min(560px, calc(100vw - 20px));
+        bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+        gap: 6px;
+        padding: 6px;
+        background: rgba(16, 19, 27, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 18px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        -webkit-backdrop-filter: blur(16px);
+        backdrop-filter: blur(16px);
+        transform: translateX(-50%);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      body.sheet-open #mobile-dock {
+        transform: translate(-50%, 110%);
+        opacity: 0;
+        pointer-events: none;
+      }
+      .dock-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        min-height: 52px;
+        padding: 6px 2px;
+        border: 0;
+        border-radius: 13px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        cursor: pointer;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        transition: background 0.15s, color 0.15s, transform 0.1s;
+      }
+      .dock-btn:active { transform: scale(0.94); }
+      .dock-btn svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .dock-btn .ico-play {
+        fill: currentColor;
+        stroke: none;
+      }
+      .dock-btn.primary {
+        background: linear-gradient(180deg, rgba(111, 208, 255, 0.2), rgba(60, 125, 255, 0.1));
+        color: var(--accent);
+      }
+      .dock-btn.is-playing { color: var(--accent); }
+      .dock-btn.is-playing .ico-play,
+      .dock-btn:not(.is-playing) .ico-pause { display: none; }
+      .dock-btn[aria-expanded="true"] {
+        color: var(--accent);
+        background: rgba(111, 208, 255, 0.1);
+      }
+      .dock-label { line-height: 1; }
+
+      /* ---------------- camera view popover ---------------- */
+      #mobile-view-menu {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        position: fixed;
+        z-index: 26;
+        left: 50%;
+        right: auto;
+        width: min(560px, calc(100vw - 20px));
+        bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+        padding: 8px;
+        background: rgba(18, 22, 31, 0.97);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+        -webkit-backdrop-filter: blur(16px);
+        backdrop-filter: blur(16px);
+        opacity: 0;
+        transform: translate(-50%, 8px);
+        pointer-events: none;
+        transition: opacity 0.18s ease, transform 0.18s ease;
+      }
+      #mobile-view-menu.open {
+        opacity: 1;
+        transform: translate(-50%, 0);
+        pointer-events: auto;
+      }
+      #mobile-view-menu button {
+        min-height: 44px;
+        border-radius: 9px;
+        background: var(--panel-2);
+        font-size: 12px;
+      }
+      #mobile-view-menu button.wide { grid-column: 1 / -1; }
+
+      /* ---------------- sheet backdrop ---------------- */
+      #sheet-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        background: rgba(5, 7, 11, 0.55);
+        -webkit-backdrop-filter: blur(2px);
+        backdrop-filter: blur(2px);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s ease;
+      }
+      body.sheet-open #sheet-backdrop {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      /* ---------------- control panel as bottom sheet ---------------- */
+      #panel {
+        position: fixed;
+        z-index: 40;
+        left: 50%;
+        right: auto;
+        bottom: 0;
+        top: auto;
+        width: min(100vw, 720px);
+        height: auto;
+        max-height: 78vh;
+        max-height: 78dvh;
+        padding: 0 16px calc(24px + env(safe-area-inset-bottom, 0px));
+        border: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 22px 22px 0 0;
+        background: rgba(19, 22, 31, 0.985);
+        box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.55);
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        transform: translate(-50%, 104%);
+        visibility: hidden;
+        transition: transform 0.3s cubic-bezier(0.22, 0.8, 0.24, 1),
+                    visibility 0s linear 0.3s;
+      }
+      body.sheet-open #panel {
+        transform: translate(-50%, 0);
+        visibility: visible;
+        transition: transform 0.3s cubic-bezier(0.22, 0.8, 0.24, 1),
+                    visibility 0s linear 0s;
+      }
+      #panel-mobile-head {
+        display: block;
+        position: sticky;
+        top: 0;
+        z-index: 6;
+        margin: 0 -16px;
+        padding: 8px 16px 6px;
+        background: rgba(19, 22, 31, 0.985);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        touch-action: none;
+      }
+      .sheet-grip {
+        width: 38px;
+        height: 4px;
+        margin: 0 auto 7px;
+        border-radius: 99px;
+        background: #3a4051;
+      }
+      .sheet-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .sheet-title-row strong {
+        font-size: 12px;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      #panel-close {
+        width: 34px;
+        height: 34px;
+        min-height: 34px;
+        padding: 0;
+        border-radius: 50%;
+        font-size: 15px;
+        line-height: 1;
+        background: var(--panel-2);
+      }
+      #mobile-tabs {
+        display: flex;
+        gap: 4px;
+        position: sticky;
+        top: 61px;
+        z-index: 5;
+        margin: 0 -16px 12px;
+        padding: 8px 16px;
+        background: rgba(19, 22, 31, 0.985);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      #mobile-tabs button {
+        flex: 1;
+        min-height: 38px;
+        padding: 4px 2px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+      }
+      #mobile-tabs button.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--bg);
+      }
+      #panel[data-mtab="sim"] [data-mgroup]:not([data-mgroup="sim"]),
+      #panel[data-mtab="visual"] [data-mgroup]:not([data-mgroup="visual"]),
+      #panel[data-mtab="scene"] [data-mgroup]:not([data-mgroup="scene"]),
+      #panel[data-mtab="data"] [data-mgroup]:not([data-mgroup="data"]) {
+        display: none !important;
+      }
+
+      /* ---------------- touch sized controls ---------------- */
+      #panel header {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      #panel header h1 { display: none; }
+      #panel .control > label:has(> input[type="checkbox"]) {
+        justify-content: flex-start;
+        gap: 10px;
+      }
+      #readout { font-size: 12px; }
+      .control { gap: 8px; }
+      .control label { min-height: 20px; }
+      .help {
+        width: 22px;
+        height: 22px;
+        margin: 0 2px 0 6px;
+        font-size: 11px;
+      }
+      button,
+      .seg-btn,
+      .preset-btn,
+      #panel select { min-height: 42px; touch-action: manipulation; }
+      #mobile-dock,
+      #mobile-tabs,
+      #mobile-view-menu { touch-action: manipulation; }
+      /* iOS Safari zooms the page when a form control smaller than 16px
+         receives focus. Bump the select font on phones to stop that. */
+      #panel select { font-size: 16px !important; }
+      input[type="range"] { min-height: 34px; }
+      input[type="checkbox"] {
+        width: 22px !important;
+        height: 22px !important;
+      }
+      #cd-plot-canvas { height: 100px !important; }
+      #selftest-log { max-height: 110px; }
+      #camera-help { font-size: 11px; }
+      .keyboard-hint { display: none; }
+      footer { padding-bottom: 4px; }
+      .err-overlay { padding: 16px; }
+      .err-overlay .box {
+        max-height: 80dvh;
+        overflow-y: auto;
+        padding: 18px;
+      }
+    }
+
+    @media (max-width: 380px) {
+      .dock-label { font-size: 9px; }
+      .m-stats { padding: 6px 8px; }
+      .m-brand strong { font-size: 12px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #panel,
+      #sheet-backdrop,
+      #mobile-dock,
+      #mobile-view-menu { transition: none; }
+    }
   </style>
 </head>
 <body>
@@ -353,7 +862,23 @@
          cube showing total drag (red) and lift (green). Drawing on
          a 2D canvas avoids touching the WebGL pipeline. -->
     <canvas id="surface-overlay" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none;z-index:2"></canvas>
-    <aside id="panel">
+    <aside id="panel" data-mtab="sim">
+      <!-- r58: mobile-only sheet header. The grabber is draggable (see
+           the pointer handlers in main()) and the close button gives
+           touch users an explicit way out of the sheet. -->
+      <div id="panel-mobile-head">
+        <div class="sheet-grip" aria-hidden="true"></div>
+        <div class="sheet-title-row">
+          <strong>Controls</strong>
+          <button type="button" id="panel-close" aria-label="Close controls">✕</button>
+        </div>
+      </div>
+      <nav id="mobile-tabs" role="tablist" aria-label="Control categories">
+        <button type="button" role="tab" aria-selected="true" data-mtab-btn="sim" class="active">Sim</button>
+        <button type="button" role="tab" aria-selected="false" data-mtab-btn="visual">Visual</button>
+        <button type="button" role="tab" aria-selected="false" data-mtab-btn="scene">Scene</button>
+        <button type="button" role="tab" aria-selected="false" data-mtab-btn="data">Data</button>
+      </nav>
       <header>
         <h1>Windsurf</h1>
 <span id="backend-badge">Detecting…</span><span id="backend-toggle">
@@ -546,7 +1071,7 @@
           <button class="preset-btn" data-preset="iso" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">Iso</button>
           <button class="preset-btn" data-preset="wake-view" style="flex:1;padding:6px 2px;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer">WakeView</button>
         </div>
-        <div class="row" style="padding:4px 0;font-size:10px;color:var(--muted)">Keys: <kbd>1</kbd>–<kbd>4</kbd> Presets</div>
+        <div class="row keyboard-hint" style="padding:4px 0;font-size:10px;color:var(--muted)">Keys: <kbd>1</kbd>–<kbd>4</kbd> Presets</div>
       </div>
       <div class="control">
         <label><span class="lbl-text">Shape <span class="help" data-tip="Artifact shape (the obstacle in the wind tunnel). Cube: flat faces, sharp corners. Sphere: smooth, lowest drag. Cylinder: direction-dependent drag (round side vs flat end differ ~3x). Wedge: triangular prism, airfoil-like. Cone: tapered, apex-first. Tetrahedron: every face is a wedge — worst-case drag, dramatic when wind hits a corner.">?</span></span><span id="shape-val">cube</span></label>
@@ -589,6 +1114,65 @@
         <a href="https://github.com/JorgeQuijano/windsurf">GitHub</a>
       </footer>
     </aside>
+  </div>
+
+  <!-- ===================================================================
+       r58: mobile chrome. Hidden on desktop via the stylesheet above.
+       =================================================================== -->
+  <div id="sheet-backdrop" aria-hidden="true"></div>
+
+  <div id="mobile-topbar">
+    <div class="m-brand">
+      <span class="m-logo" aria-hidden="true">W</span>
+      <div>
+        <strong>Windsurf</strong>
+        <small id="m-backend">starting…</small>
+      </div>
+    </div>
+    <button type="button" class="m-stats" id="mobile-stats"
+            aria-label="Open live simulation data" title="Open live data">
+      <span><b id="m-fps">–</b>fps</span>
+      <span><b id="m-cd">–</b>Cd</span>
+    </button>
+  </div>
+
+  <div id="mobile-hint">
+    <span><b>Drag</b> to orbit</span>
+    <span><b>Pinch</b> to zoom</span>
+  </div>
+
+  <div id="mobile-view-menu" role="menu" aria-label="Camera views">
+    <button type="button" role="menuitem" data-preset="top-down">Top down</button>
+    <button type="button" role="menuitem" data-preset="side-on">Side on</button>
+    <button type="button" role="menuitem" data-preset="iso">Isometric</button>
+    <button type="button" role="menuitem" data-preset="wake-view">Wake view</button>
+    <button type="button" class="wide" id="mobile-reset-view">Reset camera</button>
+  </div>
+
+  <div id="mobile-dock">
+    <button type="button" class="dock-btn primary is-playing" id="m-play"
+            aria-label="Pause simulation" aria-pressed="true">
+      <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
+      <svg class="ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5l12 7.5-12 7.5z"/></svg>
+      <span class="dock-label">Pause</span>
+    </button>
+    <button type="button" class="dock-btn" id="m-step" aria-label="Advance one step">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5l9 7-9 7zM19 5v14"/></svg>
+      <span class="dock-label">Step</span>
+    </button>
+    <button type="button" class="dock-btn" id="m-reset" aria-label="Reset simulation">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v6h6M20 20v-6h-6"/><path d="M4.8 10a8 8 0 0 1 13.1-4.1L20 8M19.2 14a8 8 0 0 1-13.1 4.1L4 16"/></svg>
+      <span class="dock-label">Reset</span>
+    </button>
+    <button type="button" class="dock-btn" id="m-views" aria-label="Camera views" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 3v18M4 7.5l8 4.5 8-4.5"/></svg>
+      <span class="dock-label">Views</span>
+    </button>
+    <button type="button" class="dock-btn" id="m-controls" aria-label="Open controls"
+            aria-expanded="false" aria-controls="panel">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+      <span class="dock-label">Controls</span>
+    </button>
   </div>
 
 <script>
@@ -4010,33 +4594,26 @@ vec3 rdbu(float t) {
   return mix(mid, pos, t);
 }
 
-// r56: fallback palette per faceId (cool, distinguishable).
-vec3 fallbackPalette(int id) {
-  vec3 cols[6] = vec3[6](
-    vec3(0.75, 0.75, 0.85),
-    vec3(0.55, 0.65, 0.75),
-    vec3(0.85, 0.75, 0.65),
-    vec3(0.55, 0.55, 0.65),
-    vec3(0.75, 0.85, 0.75),
-    vec3(0.65, 0.55, 0.55)
-  );
-  return cols[id];
-}
-
 void main() {
   float ndl = dot(normalize(v_normal), normalize(u_lightDir));
-  float lit = 0.60 + 0.40 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
+  float shade = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
+  // r58: stronger per-face contrast for the plain white artifact so the
+  // cube reads as a solid 3D object on a phone screen (the old
+  // 0.85..1.0 range flattened all six faces into one white blob).
+  float lit = (u_surfaceForces == 1)
+    ? (0.60 + 0.40 * shade)
+    : (0.42 + 0.58 * shade);
   vec3 baseCol;
   if (u_surfaceForces == 1 && u_maxAbsP > 1e-9) {
     float p = facePressure(v_faceId);
     float t = p / u_maxAbsP;            // normalise to [-1, 1]
     baseCol = rdbu(t);
   } else {
-    baseCol = fallbackPalette(v_faceId);
+    // r58: clean, uniform test artifact. The previous fallbackPalette
+    // gave the cube a pastel rainbow that competed with the flow
+    // visualization and contradicted the r21 single-color design.
+    baseCol = vec3(0.90, 0.91, 0.94);
   }
-  // r56: when surfaceForces is off, leave near-white-ish face palette so
-  // the cube stays readable. When on, the colors are saturated by design.
-  if (u_surfaceForces == 0) lit = 0.85 + 0.15 * lit;
   outColor = vec4(baseCol * lit, u_alpha);
 }`;
 
@@ -4160,8 +4737,19 @@ function emitMesh(localVerts, triangles, normals, color, rotation, position, sca
     let nz = ex1 * ey2 - ey1 * ex2;
     const nl = Math.hypot(nx, ny, nz) || 1;
     nx /= nl; ny /= nl; nz /= nl;
+    // r58: the cube shader expects pos(3) + normal(3) + faceId(1) = 7
+    // floats per vertex (r56 changed the layout but this shared emitter
+    // still wrote pos+normal+color = 9). The stale stride made every
+    // non-cube shape render as a spiky white mess. Derive a faceId from
+    // the dominant normal axis so surface-pressure mode also works for
+    // sphere/cylinder/wedge/cone/tetrahedron.
+    const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+    let faceId;
+    if (ax >= ay && ax >= az) faceId = nx > 0 ? 0 : 1;
+    else if (ay >= az)        faceId = ny > 0 ? 2 : 3;
+    else                      faceId = nz > 0 ? 4 : 5;
     for (const [wx, wy, wz] of [[wx0, wy0, wz0], [wx1, wy1, wz1], [wx2, wy2, wz2]]) {
-      out.push(wx, wy, wz, nx, ny, nz, color[0], color[1], color[2]);
+      out.push(wx, wy, wz, nx, ny, nz, faceId);
     }
   }
   return new Float32Array(out);
@@ -5872,6 +6460,133 @@ function registerTests(tr) {
     if (!L.stats.frameCount) await __waitFrames(3);
     tr.assert(L.stats.streamVerts > 0, 'streamline geometry must be non-empty once the solver has run');
   });
+
+  // -- r58: mobile layout / touch controls --
+  // The mobile chrome lives in the HTML (not generated), so verify every
+  // hook the mobile JS depends on is present. In the browser we can
+  // query the DOM directly; in the Node vm runner we check the source.
+  tr.test('r58_mobile_chrome_dom_present', () => {
+    const required = [
+      'mobile-topbar', 'mobile-hint', 'mobile-dock', 'mobile-view-menu',
+      'sheet-backdrop', 'panel-mobile-head', 'mobile-tabs',
+      'm-play', 'm-step', 'm-reset', 'm-views', 'm-controls', 'mobile-stats',
+      'panel-close', 'mobile-reset-view',
+    ];
+    if (typeof __getSource === 'function') {
+      const src = __getSource();
+      for (const id of required) {
+        tr.assert(src.includes('id="' + id + '"'), 'missing mobile element #' + id);
+      }
+      tr.assert(src.includes('data-mtab-btn="sim"'), 'missing mobile Sim tab');
+      tr.assert(src.includes('data-mtab-btn="data"'), 'missing mobile Data tab');
+      return;
+    }
+    for (const id of required) {
+      tr.assert(!!document.getElementById(id), 'missing mobile element #' + id);
+    }
+  });
+
+  // Responsive CSS must actually take over the canvas on phone widths
+  // and lock canvas gestures so the page never scrolls/pinch-zooms.
+  tr.test('r58_mobile_css_source', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.length > 0, 'could not read app source');
+    tr.assert(src.includes('@media (max-width: 900px)'), 'missing phone media query');
+    tr.assert(src.includes('touch-action: none'), 'canvas must disable native touch actions');
+    tr.assert(src.includes('100dvh'), 'mobile app should use dynamic viewport height');
+    tr.assert(src.includes('env(safe-area-inset-bottom'), 'mobile dock must respect safe areas');
+    tr.assert(src.includes('body.sheet-open #panel'), 'bottom sheet open state missing');
+    tr.assert(src.includes('[data-mgroup="sim"]'), 'mobile tab filtering missing');
+  });
+
+  // Gesture + performance port: pointer events (mouse + touch), pinch
+  // dolly, and the smaller mobile lattice / raymarch budget.
+  tr.test('r58_mobile_gesture_and_grid_source', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.length > 0, 'could not read app source');
+    tr.assert(src.includes("target.addEventListener('pointerdown'"), 'pointerdown orbit missing');
+    tr.assert(src.includes("target.addEventListener('pointermove'"), 'pointermove orbit missing');
+    tr.assert(src.includes('bindCameraGestures(canvas)'), 'camera gestures must bind to the render canvas');
+    tr.assert(src.includes('bindCameraGestures(tc)'), 'camera gestures must bind to the three.js canvas');
+    tr.assert(src.includes('activePointers'), 'multi-pointer tracking missing');
+    tr.assert(src.includes('pinchDist'), 'pinch zoom state missing');
+    tr.assert(src.includes('camera.wheel((pinchDist / dist - 1) * 1000)'), 'pinch zoom mapping missing');
+    tr.assert(src.includes('nx: 24, ny: 16, nz: 16'), 'mobile lattice spec missing');
+    tr.assert(src.includes('const RAY_STEPS = isMobile ? 64 : 128'), 'mobile raymarch budget missing');
+    tr.assert(src.includes('window.visualViewport'), 'mobile viewport resize handling missing');
+  });
+
+  // Dock actions are wired to the same state as the desktop buttons.
+  tr.test('r58_mobile_dock_wiring_source', () => {
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    tr.assert(src.length > 0, 'could not read app source');
+    tr.assert(src.includes("mPlayBtn.addEventListener('click', () => setPlaying(!playing))"),
+      'mobile play button not wired');
+    tr.assert(src.includes("mStepBtn.addEventListener('click', () => { stepOnce = true; })"),
+      'mobile step button not wired');
+    tr.assert(src.includes("mResetBtn.addEventListener('click', () => { applyConfig(); })"),
+      'mobile reset button not wired');
+    tr.assert(src.includes("mControlsBtn.addEventListener('click', () => setSheet(!sheetIsOpen()))"),
+      'mobile controls button not wired');
+    tr.assert(src.includes('function syncPlayUI()'), 'shared play/pause UI sync missing');
+  });
+
+  // r58: regression for the invisible-artifact bug. buildCubeMesh has
+  // the signature (scale, halfExtents, position, rotation); a stale
+  // call site passed CUBE_FACE_COLORS before rotation, so every vertex
+  // became NaN and the cube never rendered. Verify the mesh is finite
+  // under a real rotation, then guard the call site in source.
+  tr.test('r58_cube_mesh_rotation_is_finite', () => {
+    const rot = Mat3.fromEulerXYZ(0.3, 0.4, 0.5);
+    const mesh = buildCubeMesh(1, { x: 3, y: 3, z: 3 }, { x: 4.5, y: 0, z: 0 }, rot);
+    tr.assert(mesh.length > 0, 'cube mesh must not be empty');
+    for (let i = 0; i < mesh.length; i++) {
+      tr.assert(Number.isFinite(mesh[i]), 'cube mesh vertex ' + i + ' must be finite');
+    }
+    const src = typeof __getSource === 'function'
+      ? __getSource()
+      : (document.documentElement ? document.documentElement.outerHTML : '');
+    // Build the forbidden call from parts so this test's own source
+    // doesn't satisfy the string match.
+    const legacyCall = 'buildCubeMesh(1, t.scale, t.position, ' + 'CUBE_FACE_COLORS, t.rotation)';
+    tr.assert(!src.includes(legacyCall),
+      'cube call site must pass t.rotation as the 4th argument');
+    const goodCall = 'buildCubeMesh(1, t.scale, t.position, ' + 't.rotation)';
+    tr.assert(src.includes(goodCall), 'cube call site must pass t.rotation');
+  });
+
+  // r58: the shared mesh emitter must produce the same 7-float layout
+  // as the cube (pos + normal + faceId). The old 9-float output made
+  // every non-cube shape render as a spiky garbage mesh.
+  tr.test('r58_non_cube_meshes_use_7_float_layout', () => {
+    const rot = Mat3.fromEulerXYZ(0.2, 0.5, 0.1);
+    const pos = { x: 4.5, y: 0, z: 0 };
+    const meshes = {
+      sphere: buildSphereMesh(1, 2.25, pos, rot, [0.9, 0.9, 0.9], 8, 10),
+      cylinder: buildCylinderMesh(1, 2.25, pos, rot, [0.9, 0.9, 0.9], 10),
+      wedge: buildWedgeMesh(1, 2.25, pos, rot, [0.9, 0.9, 0.9]),
+      cone: buildConeMesh(1, 2.25, pos, rot, [0.9, 0.9, 0.9], 10),
+      tetrahedron: buildTetrahedronMesh(1, 2.25, pos, rot, [0.9, 0.9, 0.9]),
+    };
+    for (const name in meshes) {
+      const mesh = meshes[name];
+      tr.assert(mesh.length > 0, name + ' mesh must not be empty');
+      tr.assert(mesh.length % 7 === 0,
+        name + ' mesh must use 7 floats/vertex, got ' + mesh.length);
+      for (let i = 0; i < mesh.length; i++) {
+        tr.assert(Number.isFinite(mesh[i]), name + ' mesh vertex ' + i + ' must be finite');
+      }
+      for (let i = 6; i < mesh.length; i += 7) {
+        tr.assert(mesh[i] >= 0 && mesh[i] <= 5, name + ' faceId must be 0..5, got ' + mesh[i]);
+      }
+    }
+  });
 }
 
 /* =====================================================================
@@ -5884,9 +6599,29 @@ function makeCamera(spec) {
   // can never dip below the floor (no seeing underneath the tunnel).
   const cx = 0, cy = 0, cz = 0;
   const r = Math.max(spec.nx, spec.ny, spec.nz) * 1.4;
+  // r58: the original fixed distance (r) fits the volume on a desktop
+  // aspect ratio but crops the 24-cell tunnel length badly on a
+  // portrait phone. Compute the distance needed for the current
+  // viewport's horizontal FOV as well and use the larger of the two.
+  // Desktop (wide) aspect stays exactly at r; phones zoom out just
+  // enough to show the full inlet → outlet span.
+  const initialAspect = (typeof window !== 'undefined' && window.innerWidth && window.innerHeight)
+    ? window.innerWidth / window.innerHeight
+    : 16 / 9;
+  let lastAspect = initialAspect;
+  function fitDistance(aspect) {
+    const vFov = Math.PI / 3;
+    const safeAspect = Math.max(0.2, aspect || 1);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * safeAspect);
+    const halfX = spec.nx / 2 + 1;   // one lattice cell of margin
+    const halfY = spec.ny / 2 + 1;
+    const dH = halfX / Math.tan(hFov / 2);
+    const dV = halfY / Math.tan(vFov / 2);
+    return Math.max(r, dH, dV);
+  }
   let theta = Math.PI * 0.25; // azimuth
   let phi = Math.PI * 0.28;   // polar from +Y (eye-level above the tunnel)
-  let dist = r;
+  let dist = fitDistance(initialAspect);
   const target = { x: cx, y: cy, z: cz };
   const floorY = -spec.ny / 2;
   const FLOOR_MARGIN = 0.5;
@@ -5907,6 +6642,7 @@ function makeCamera(spec) {
     return { pos: { x, y, z }, target };
   }
   function viewProj(aspect) {
+    lastAspect = aspect;
     const { pos, target } = update();
     // Simple lookAt.
     const f = Vec3.normalize(Vec3.sub(target, pos));
@@ -5961,15 +6697,15 @@ function makeCamera(spec) {
     // violates the floor margin (e.g. top-down at low dist) is corrected.
     setPreset(name) {
       const k = String(name || '').toLowerCase().trim();
-      const r = Math.max(spec.nx, spec.ny, spec.nz) * 1.4;
-      if (k === 'iso')             { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = r; }
-      else if (k === 'top-down')   { theta = Math.PI * 0.25; phi = Math.PI * 0.10; dist = r; }
-      else if (k === 'side-on')    { theta = Math.PI * 0.50; phi = Math.PI * 0.50; dist = r; }
-      else if (k === 'wake-view')  { theta = Math.PI * 0.00; phi = Math.PI * 0.42; dist = r; }
+      const fit = fitDistance(lastAspect);
+      if (k === 'iso')             { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = fit; }
+      else if (k === 'top-down')   { theta = Math.PI * 0.25; phi = Math.PI * 0.10; dist = fit; }
+      else if (k === 'side-on')    { theta = Math.PI * 0.50; phi = Math.PI * 0.50; dist = fit; }
+      else if (k === 'wake-view')  { theta = Math.PI * 0.00; phi = Math.PI * 0.42; dist = fit; }
       else return;          // unknown preset — no-op
       clampPhi();
     },
-    reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = Math.max(spec.nx, spec.ny, spec.nz) * 1.4; },
+    reset(spec) { theta = Math.PI * 0.25; phi = Math.PI * 0.28; dist = fitDistance(lastAspect); },
   };
 }
 
@@ -6392,6 +7128,13 @@ async function main() {
   const threeCanvasEl = document.getElementById('three-canvas');
   let threeLayer = null;
   let threeMode = false;
+  // r58: the self-test suite has source-level checks. The Node runner
+  // injects __getSource into its vm context; in the browser we expose
+  // the live document markup so the same assertions pass without a
+  // separate copy of the HTML.
+  if (!window.__getSource && document.documentElement) {
+    window.__getSource = () => document.documentElement.outerHTML;
+  }
   const badge = document.getElementById('backend-badge');
   const fpsEl = document.getElementById('fps');
   const spsEl = document.getElementById('sps');
@@ -6478,13 +7221,68 @@ async function main() {
   const selftestLog = document.getElementById('selftest-log');
   const runSelftestBtn = document.getElementById('run-selftest');
 
-  const spec = { nx: 32, ny: 24, nz: 24 };
+  // r58: mobile chrome refs. Kept alongside the desktop refs so the main
+  // loop can update the compact HUD without re-querying the DOM.
+  const mobileHint = document.getElementById('mobile-hint');
+  const mFpsEl = document.getElementById('m-fps');
+  const mCdEl = document.getElementById('m-cd');
+  const mBackendEl = document.getElementById('m-backend');
+  const mPlayBtn = document.getElementById('m-play');
+  const mStepBtn = document.getElementById('m-step');
+  const mResetBtn = document.getElementById('m-reset');
+  const mViewsBtn = document.getElementById('m-views');
+  const mControlsBtn = document.getElementById('m-controls');
+  const mobileViewMenu = document.getElementById('mobile-view-menu');
+  const mobileResetViewBtn = document.getElementById('mobile-reset-view');
+  const panelEl = document.getElementById('panel');
+  const panelCloseBtn = document.getElementById('panel-close');
+  const panelMobileHead = document.getElementById('panel-mobile-head');
+  const sheetBackdrop = document.getElementById('sheet-backdrop');
+
+  // r58: mobile / touch detection. `?mobile=1` and `?desktop=1` force
+  // the lighter/heavier solver profile for benchmarking; the visual
+  // layout still follows the viewport via the max-width:900px CSS.
+  // Phones get a smaller lattice (24x16x16 vs 32x24x24) so the CPU
+  // solver can hold a smooth frame rate; tablets and touch laptops
+  // with plenty of width keep the desktop layout but still get the
+  // pointer-event camera (one-finger orbit + pinch zoom).
+  const __forceMobile = location.search.includes('mobile=1');
+  const __forceDesktop = location.search.includes('desktop=1');
+  const __coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const __finePointer = !!(window.matchMedia && window.matchMedia('(any-pointer: fine)').matches);
+  const isMobile = __forceMobile ? true
+                 : __forceDesktop ? false
+                 : window.innerWidth <= 900 || (__coarsePointer && !__finePointer);
+  if (isMobile) document.documentElement.classList.add('mobile-ui');
+
+  // r58: the solver grid follows the layout. 24x16x16 = 6,144 cells
+  // (~3x less work than 32x24x24 = 18,432) while keeping the obstacle
+  // and wake proportional. The artifact is placed at 3/16 of the
+  // domain length, same relative position as the desktop scene.
+  const spec = isMobile
+    ? { nx: 24, ny: 16, nz: 16 }
+    : { nx: 32, ny: 24, nz: 24 };
+  const ARTIFACT_CENTER_X = spec.nx * 3 / 16;
+  const ARTIFACT_SIZE = isMobile ? 2.25 : 3;
+  // Ray-march samples per pixel. Mobile GPUs pay for every sample, so
+  // phones start at 64 (still plenty for the 24^3 volume) and desktop
+  // keeps the original 128.
+  const RAY_STEPS = isMobile ? 64 : 128;
+
+  // Mobile starts with a smaller streamline field and a 30 fps budget.
+  // Both are normal controls in the sheet, so users can raise them.
+  if (isMobile) {
+    streamCountSlider.value = '48';
+    streamCountVal.textContent = '48';
+  }
+
   const defaultConfig = {
     nx: spec.nx, ny: spec.ny, nz: spec.nz,
     u_inf: parseFloat(uInfInput.value),
     rho0: 1.0,
     viscosity: parseFloat(viscInput.value),
-    obstacles: [obstacleBox({ x: 6, y: 0, z: 0 }, { x: 3, y: 3, z: 3 })],
+    obstacles: [obstacleBox({ x: ARTIFACT_CENTER_X, y: 0, z: 0 },
+                            { x: ARTIFACT_SIZE, y: ARTIFACT_SIZE, z: ARTIFACT_SIZE })],
   };
 
   // GPU or CPU compute backend.
@@ -6544,6 +7342,11 @@ async function main() {
   } else {
     badge.textContent = 'CPU compute (WebGL2 render)';
     badge.classList.add('cpu');
+  }
+  if (mBackendEl) {
+    mBackendEl.textContent = isGpu ? 'WebGPU compute'
+      : (gpuRequested && !gpuAvailable) ? 'CPU · GPU unavailable'
+      : 'CPU · WebGL2';
   }
   // r57: wire the CPU/GPU segmented toggle in the header.
   const toggle = document.getElementById('backend-toggle');
@@ -6627,20 +7430,11 @@ async function main() {
   } catch (e) {
     console.warn('Cube renderer init failed:', e);
   }
-  // r21: single color for all 6 cube faces (per user request). The
-  // previous per-face rainbow made it hard to tell at a glance whether
-  // the cube was a single object; uniform white reads as a clean
-  // "test artifact" against the dark background. Lit normally by the
-  // half-Lambert lighting in CUBE_FS so the faces still look distinct
-  // (different lighting on different normals).
-  const CUBE_FACE_COLORS = [
-    [0.92, 0.92, 0.92],  // +x
-    [0.92, 0.92, 0.92],  // -x
-    [0.92, 0.92, 0.92],  // +y
-    [0.92, 0.92, 0.92],  // -y
-    [0.92, 0.92, 0.92],  // +z
-    [0.92, 0.92, 0.92],  // -z
-  ];
+  // r21/r58: the artifact is a single clean light-gray solid. Face
+  // distinction comes from the half-Lambert lighting in CUBE_FS, not a
+  // per-face palette, so the cube reads as one object against the dark
+  // tunnel. (SurfaceForces mode temporarily paints faces by pressure.)
+
   // Fixed light direction (world space): from above-right-front.
   const LIGHT_DIR = [0.5, 0.8, 0.3];
   const showVolumetric = !location.search.includes('vol=0');
@@ -6790,10 +7584,11 @@ async function main() {
     const rz = rzDeg * Math.PI / 180;
     const rotation = Mat3.fromEulerXYZ(rx, ry, rz);
     // Position is fixed (user said "stay in position"). Scale gives
-    // half-extent in local units (-1..+1). Default 3 matches the
-    // original cube size.
-    const SIZE = 3;
-    const center = { x: 6, y: 0, z: 0 };
+    // half-extent in local units (-1..+1). r58: both follow the
+    // responsive grid spec so the artifact keeps the same relative
+    // footprint on phones (24x16x16) as on desktop (32x24x24).
+    const SIZE = ARTIFACT_SIZE;
+    const center = { x: ARTIFACT_CENTER_X, y: 0, z: 0 };
     let base;
     switch (shape) {
       case 'sphere':
@@ -6886,7 +7681,12 @@ async function main() {
             // r28: pass t.rotation — buildCubeMesh now honors it (was being
             // silently dropped, leaving the mesh axis-aligned even when
             // the rotation sliders moved).
-            mesh = buildCubeMesh(1, t.scale, t.position, CUBE_FACE_COLORS, t.rotation);
+            // r58: signature is (scale, halfExtents, position, rotation).
+            // The old call still passed the legacy color array before
+            // rotation, so `rotation` received CUBE_FACE_COLORS and every
+            // vertex became NaN — the artifact was invisible on all
+            // devices. Pass t.rotation directly.
+            mesh = buildCubeMesh(1, t.scale, t.position, t.rotation);
             break;
           case 'sphere':
             mesh = buildSphereMesh(1, t.scale.x, t.position, t.rotation, color);
@@ -7168,10 +7968,12 @@ async function main() {
     }
   }
   if (frameBudgetSelect) {
-    // Set to 60 by default — this is a deviation from "uncapped" but the
-    // first-time UX is much better at 60.
-    frameBudgetSelect.value = '60';
-    applyFrameBudget(60);
+    // Set to 60 on desktop for a snappy first impression. Phones start
+    // at 30 fps to save battery/thermals; the user can pick 60 from the
+    // sheet or the Data tab at any time.
+    const defaultHz = isMobile ? 30 : 60;
+    frameBudgetSelect.value = String(defaultHz);
+    applyFrameBudget(defaultHz);
     frameBudgetSelect.addEventListener('change', () => {
       const hz = parseInt(frameBudgetSelect.value, 10);
       applyFrameBudget(hz);
@@ -7660,13 +8462,25 @@ async function main() {
     _origOnArtifactChange();
     clearCdSamples();
   };
-  playBtn.textContent = '⏸ Pause';
-  playBtn.classList.toggle('primary', playing);
-  playBtn.addEventListener('click', () => {
-    playing = !playing;
+  // r58: single source of truth for the play/pause state so the desktop
+  // button and the mobile dock stay in sync.
+  function syncPlayUI() {
     playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
     playBtn.classList.toggle('primary', playing);
-  });
+    if (mPlayBtn) {
+      mPlayBtn.classList.toggle('is-playing', playing);
+      mPlayBtn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+      mPlayBtn.setAttribute('aria-label', playing ? 'Pause simulation' : 'Play simulation');
+      const lbl = mPlayBtn.querySelector('.dock-label');
+      if (lbl) lbl.textContent = playing ? 'Pause' : 'Play';
+    }
+  }
+  function setPlaying(next) {
+    playing = !!next;
+    syncPlayUI();
+  }
+  syncPlayUI();
+  playBtn.addEventListener('click', () => setPlaying(!playing));
   stepBtn.addEventListener('click', () => { stepOnce = true; });
   resetBtn.addEventListener('click', () => { applyConfig(); });
 
@@ -7701,25 +8515,85 @@ async function main() {
     el.addEventListener('mouseleave', hideTip);
     // Also support keyboard focus for accessibility (Tab to icon).
     el.setAttribute('tabindex', '0');
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', 'Show help');
     el.addEventListener('focus', () => showTip(el));
     el.addEventListener('blur', hideTip);
+    // r58: touch users have no hover. Tapping the help dot toggles the
+    // floater; the capture-phase pointerdown below dismisses it when
+    // they tap anywhere else.
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Always (re)show on tap. A toggle here would immediately close:
+      // touch browsers fire `focus` before `click`, and the focus
+      // handler above has already opened the floater.
+      showTip(el);
+    });
   }
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest || !e.target.closest('.help')) hideTip();
+  }, true);
 
-  // Camera drag/zoom.
-  canvas.addEventListener('mousedown', (e) => {
-    let lastX = e.clientX, lastY = e.clientY;
-    const move = (ev) => {
-      camera.drag(ev.clientX - lastX, ev.clientY - lastY);
-      lastX = ev.clientX; lastY = ev.clientY;
-    };
-    const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  });
-  canvas.addEventListener('wheel', (e) => { camera.wheel(e.deltaY); e.preventDefault(); }, { passive: false });
+  // r58: unified pointer camera. Works identically for mouse and touch:
+  //   · one pointer  -> orbit (same drag math as before)
+  //   · two pointers -> pinch dolly (distance ratio maps to camera.wheel)
+  // The canvas has touch-action:none in the mobile stylesheet, so the
+  // browser never steals the gesture for page pan/zoom. Bound to both
+  // the volumetric canvas and the three.js overlay when it activates.
+  let hintDismissed = false;
+  function dismissHint() {
+    if (hintDismissed || !mobileHint) return;
+    hintDismissed = true;
+    mobileHint.classList.add('hidden');
+  }
+  function bindCameraGestures(target) {
+    const activePointers = new Map();
+    let pinchDist = 0;
+    target.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      try { target.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (activePointers.size === 2) {
+        const [a, b] = Array.from(activePointers.values());
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      }
+      dismissHint();
+      e.preventDefault();
+    });
+    target.addEventListener('pointermove', (e) => {
+      const p = activePointers.get(e.pointerId);
+      if (!p) return;
+      const prevX = p.x, prevY = p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (activePointers.size === 1) {
+        camera.drag(e.clientX - prevX, e.clientY - prevY);
+        if (cameraPresetVal) cameraPresetVal.textContent = 'free';
+      } else if (activePointers.size === 2) {
+        const [a, b] = Array.from(activePointers.values());
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchDist > 0 && dist > 0) {
+          // pinch out (dist grows) => ratio < 1 => camera.wheel gets a
+          // negative delta => dist shrinks => zoom in.
+          camera.wheel((pinchDist / dist - 1) * 1000);
+          pinchDist = dist;
+        }
+      }
+      e.preventDefault();
+    }, { passive: false });
+    function endPointer(e) {
+      activePointers.delete(e.pointerId);
+      if (activePointers.size < 2) pinchDist = 0;
+    }
+    target.addEventListener('pointerup', endPointer);
+    target.addEventListener('pointercancel', endPointer);
+    target.addEventListener('lostpointercapture', endPointer);
+    target.addEventListener('wheel', (e) => {
+      camera.wheel(e.deltaY);
+      e.preventDefault();
+    }, { passive: false });
+  }
+  bindCameraGestures(canvas);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'r' || e.key === 'R') camera.reset(spec);
     // r48: keyboard shortcuts for the four camera presets.
@@ -7741,7 +8615,7 @@ async function main() {
   // deselects the preset label back to 'iso' since the user has left the
   // canonical view).
   const cameraPresetVal = document.getElementById('camera-preset-val');
-  const presetBtns = Array.from(document.querySelectorAll('.preset-btn'));
+  const presetBtns = Array.from(document.querySelectorAll('.preset-btn, #mobile-view-menu [data-preset]'));
   function setPreset(name) {
     camera.setPreset(name);
     if (cameraPresetVal) cameraPresetVal.textContent = name;
@@ -7757,6 +8631,195 @@ async function main() {
   }
   // Initialise the button highlight to match the default 'iso'.
   setPreset('iso');
+
+  /* =====================================================================
+     r58 — Mobile control surface
+     ---------------------------------------------------------------------
+     The markup for the dock / sheet / tabs is always present (hidden on
+     desktop), so listeners are wired unconditionally. Grouping control
+     wrappers with data-mgroup is also harmless on desktop: only the
+     mobile stylesheet reads the attribute.
+     ===================================================================== */
+  const groupControl = (elOrId, group) => {
+    const el = typeof elOrId === 'string' ? document.getElementById(elOrId) : elOrId;
+    const wrap = el && el.closest ? el.closest('.control') : null;
+    if (wrap) wrap.dataset.mgroup = group;
+  };
+  // Simulation
+  ['u-inf', 'visc', 'spf-slider', 'osc-section', 'smag-cs-slider']
+    .forEach(id => groupControl(id, 'sim'));
+  // Visualization
+  ['streamline-count', 'opacity-slider', 'stream-opacity-slider',
+   'ribbon-toggle', 'surface-forces-toggle', 'ribbon-width-slider',
+   'pathline-toggle', 'smoke-toggle', 'smoke-opacity-slider',
+   'smoke-decay-slider', 'field-mode-select', 'slice-enabled']
+    .forEach(id => groupControl(id, 'visual'));
+  groupControl(document.querySelector('.trail-mode-control'), 'visual');
+  // Scene / camera
+  ['artifact-shape', 'rot-x', 'rot-y', 'rot-z']
+    .forEach(id => groupControl(id, 'scene'));
+  groupControl(cameraPresetVal, 'scene');
+  // Data / diagnostics
+  const _mg = (id) => { const el = document.getElementById(id); if (el) el.dataset.mgroup = 'data'; };
+  _mg('readout');
+  _mg('build-tag');
+  _mg('selftest-section');
+  groupControl(document.getElementById('frame-budget-select'), 'data');
+  groupControl(document.getElementById('cd-plot-canvas'), 'data');
+  groupControl(document.getElementById('camera-help'), 'scene');
+  const _footer = document.querySelector('#panel footer');
+  if (_footer) _footer.dataset.mgroup = 'data';
+
+  // Touch-specific help copy (there is no keyboard on a phone).
+  const cameraHelpEl = document.getElementById('camera-help');
+  if (isMobile && cameraHelpEl) {
+    cameraHelpEl.innerHTML = '<kbd>Drag</kbd> orbit · <kbd>Pinch</kbd> zoom';
+  }
+
+  const sheetIsOpen = () => document.body.classList.contains('sheet-open');
+  function closeViewMenu() {
+    if (!mobileViewMenu) return;
+    mobileViewMenu.classList.remove('open');
+    if (mViewsBtn) mViewsBtn.setAttribute('aria-expanded', 'false');
+  }
+  function setSheet(open) {
+    document.body.classList.toggle('sheet-open', open);
+    if (mControlsBtn) mControlsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (isMobile && panelEl) panelEl.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (open) {
+      closeViewMenu();
+      dismissHint();
+    }
+  }
+  if (isMobile && panelEl) panelEl.setAttribute('aria-hidden', 'true');
+  // Keep aria-hidden coherent if the viewport crosses the breakpoint
+  // (phone rotation, tablet split-screen, desktop window resize).
+  if (window.matchMedia && panelEl) {
+    const mq = window.matchMedia('(max-width: 900px)');
+    const syncPanelAria = () => {
+      if (!mq.matches) panelEl.removeAttribute('aria-hidden');
+      else panelEl.setAttribute('aria-hidden', sheetIsOpen() ? 'false' : 'true');
+    };
+    if (mq.addEventListener) mq.addEventListener('change', syncPanelAria);
+    else if (mq.addListener) mq.addListener(syncPanelAria);
+  }
+  if (mControlsBtn) mControlsBtn.addEventListener('click', () => setSheet(!sheetIsOpen()));
+  if (panelCloseBtn) panelCloseBtn.addEventListener('click', () => setSheet(false));
+  if (sheetBackdrop) sheetBackdrop.addEventListener('click', () => setSheet(false));
+
+  // Sheet tabs. Each tab filters the control wrappers using the
+  // data-mgroup attributes assigned above.
+  const mtabBtns = Array.from(document.querySelectorAll('#mobile-tabs [data-mtab-btn]'));
+  function setTab(tab) {
+    if (panelEl) {
+      panelEl.dataset.mtab = tab;
+      // Switching categories should always start at the top of the new
+      // list instead of inheriting the previous tab's scroll offset.
+      panelEl.scrollTop = 0;
+    }
+    for (const btn of mtabBtns) {
+      const active = btn.getAttribute('data-mtab-btn') === tab;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+  }
+  for (const btn of mtabBtns) {
+    btn.addEventListener('click', () => setTab(btn.getAttribute('data-mtab-btn')));
+  }
+  setTab('sim');
+
+  // The live HUD doubles as a shortcut to the Data tab (a natural
+  // affordance on a phone: tap the numbers you're watching).
+  const mobileStatsBtn = document.getElementById('mobile-stats');
+  if (mobileStatsBtn) {
+    mobileStatsBtn.addEventListener('click', () => {
+      setTab('data');
+      setSheet(true);
+    });
+  }
+
+  // Dock actions.
+  if (mPlayBtn) mPlayBtn.addEventListener('click', () => setPlaying(!playing));
+  if (mStepBtn) mStepBtn.addEventListener('click', () => { stepOnce = true; });
+  if (mResetBtn) mResetBtn.addEventListener('click', () => { applyConfig(); });
+  // A tiny haptic tick makes the dock feel native on devices that
+  // support the Vibration API. Failure is silent everywhere else.
+  for (const btn of document.querySelectorAll('.dock-btn')) {
+    btn.addEventListener('pointerup', () => {
+      try { if (navigator.vibrate) navigator.vibrate(8); } catch (e) { /* noop */ }
+    });
+  }
+
+  // Camera-view popover.
+  function setViewMenu(open) {
+    if (!mobileViewMenu) return;
+    mobileViewMenu.classList.toggle('open', open);
+    if (mViewsBtn) mViewsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  if (mViewsBtn) {
+    mViewsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setViewMenu(!mobileViewMenu.classList.contains('open'));
+    });
+  }
+  if (mobileViewMenu) {
+    mobileViewMenu.querySelectorAll('[data-preset]').forEach((b) => {
+      b.addEventListener('click', () => {
+        setPreset(b.dataset.preset);
+        setViewMenu(false);
+      });
+    });
+  }
+  if (mobileResetViewBtn) {
+    mobileResetViewBtn.addEventListener('click', () => {
+      camera.reset(spec);
+      setPreset('iso');
+      setViewMenu(false);
+    });
+  }
+  document.addEventListener('pointerdown', (e) => {
+    if (!mobileViewMenu || !mobileViewMenu.classList.contains('open')) return;
+    if (!mobileViewMenu.contains(e.target) &&
+        !(mViewsBtn && mViewsBtn.contains(e.target))) {
+      setViewMenu(false);
+    }
+  }, true);
+
+  // Swipe the sheet header down to dismiss. The close button is
+  // excluded so tapping it still fires a normal click.
+  if (isMobile && panelMobileHead && panelEl) {
+    let dragStartY = null;
+    panelMobileHead.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      dragStartY = e.clientY;
+      try { panelMobileHead.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+    });
+    panelMobileHead.addEventListener('pointermove', (e) => {
+      if (dragStartY == null) return;
+      const dy = Math.max(0, e.clientY - dragStartY);
+      panelEl.style.transform = 'translate(-50%, ' + dy + 'px)';
+      e.preventDefault();
+    });
+    const endSheetDrag = (e) => {
+      if (dragStartY == null) return;
+      const dy = Math.max(0, e.clientY - dragStartY);
+      panelEl.style.transform = '';
+      if (dy > 90) setSheet(false);
+      dragStartY = null;
+    };
+    panelMobileHead.addEventListener('pointerup', endSheetDrag);
+    panelMobileHead.addEventListener('pointercancel', endSheetDrag);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      setSheet(false);
+      closeViewMenu();
+    }
+  });
+  // Auto-hide the gesture hint after a few seconds. It also hides on
+  // the first canvas interaction (dismissHint in the pointer handler).
+  if (mobileHint) setTimeout(dismissHint, 7000);
 
   // Self-test runner.
   const tr = new TestRunner();
@@ -7993,7 +9056,7 @@ async function main() {
           volumeMax: [ spec.nx / 2,  spec.ny / 2,  spec.nz / 2],
           densityScale: 5.0,    // r16: scale up after baseline subtraction. d = (val-1)*5 → max ≈ 2.5 → viridis teal-green for pressure regions, 0 (skipped) for bulk.
           alphaScale: 0.60,     // r42: bumped from 0.20 so wake structure is visible at default camera distance. Per-step alpha is clamped to 0.35 in the shader so this can crank without saturating.
-          steps: 128,          // r9: doubled steps so the ray can resolve interior structure.
+          steps: RAY_STEPS,      // r9: doubled steps so the ray can resolve interior structure. r58: 64 on phones.
           fieldMode,
           solidOpacity: 0.0,
           debugMode,
@@ -8160,6 +9223,9 @@ async function main() {
           updateDragUI(r);
         }
       }
+      // r58: mirror the essentials into the mobile HUD.
+      if (mFpsEl) mFpsEl.textContent = fps.toFixed(0);
+      if (mCdEl) mCdEl.textContent = cdEl.textContent;
       simStepsPerSecond = simStepsThisSecond * (1000 / (t0 - lastStatsT));
       simStepsThisSecond = 0;
       lastStatsT = t0;
@@ -8182,6 +9248,19 @@ async function main() {
     }
   }
   window.addEventListener('resize', resize);
+  // r58: address-bar show/hide and orientation changes don't always fire
+  // a window resize on iOS. visualViewport does; debounce to the next
+  // frame so we don't churn the framebuffer during the animation.
+  let _resizePending = false;
+  function scheduleResize() {
+    if (_resizePending) return;
+    _resizePending = true;
+    requestAnimationFrame(() => { _resizePending = false; resize(); });
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', scheduleResize);
+  }
+  window.addEventListener('orientationchange', () => setTimeout(resize, 250));
   resize();
 
   // r58: init entry point for the three.js presentation layer. The
@@ -8198,25 +9277,11 @@ async function main() {
       // Route orbit/zoom gestures on the new top canvas to the SAME
       // camera object the legacy canvas used (single source of truth:
       // presets, R-reset, floor clamp and the volume ray-march all keep
-      // working because vp still comes from that camera).
+      // working because vp still comes from that camera). r59: use the
+      // shared pointer binder so one-finger drag + pinch zoom work on
+      // phones too (the old mousedown-only path was desktop-only).
       const tc = threeCanvasEl;
-      tc.addEventListener('mousedown', (e) => {
-        let lastX = e.clientX, lastY = e.clientY;
-        const move = (ev) => {
-          camera.drag(ev.clientX - lastX, ev.clientY - lastY);
-          lastX = ev.clientX; lastY = ev.clientY;
-        };
-        const up = () => {
-          window.removeEventListener('mousemove', move);
-          window.removeEventListener('mouseup', up);
-        };
-        window.addEventListener('mousemove', move);
-        window.addEventListener('mouseup', up);
-      });
-      tc.addEventListener('wheel', (e) => {
-        camera.wheel(e.deltaY);
-        e.preventDefault();
-      }, { passive: false });
+      bindCameraGestures(tc);
       tc.style.display = 'block';
       resize();
       threeMode = true;
